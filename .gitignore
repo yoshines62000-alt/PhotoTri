@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.venv/
+.vscode/
+.claude/
+build/
+dist/
+*.spec.bak
+*.sqlite
+*.sqlite3
