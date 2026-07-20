@@ -33,10 +33,14 @@ from PIL import Image, ImageTk
 
 import grouping
 import scanner
+import update_checker
 from db import Database
 
 APP_TITLE = "PhotoTri"
 DONATE_URL = "https://ko-fi.com/yoshines62000"
+APP_VERSION = "1.0.0"
+UPDATE_REPO = "yoshines62000-alt/PhotoTri"
+RELEASES_URL = f"https://github.com/{UPDATE_REPO}/releases/latest"
 THUMBNAIL_SIZE = (150, 150)
 BODY_FONT = ("Segoe UI", 10)
 
@@ -182,9 +186,33 @@ class PhotoTriApp:
 
         bottom_bar = ttk.Frame(self.root)
         bottom_bar.pack(fill=X, side="bottom")
+        ttk.Label(bottom_bar, text=f"v{APP_VERSION}", foreground="#666").pack(side=LEFT, padx=(8, 0), pady=4)
+        self.update_status_var = StringVar(value="")
+        self.update_status_label = ttk.Label(bottom_bar, textvariable=self.update_status_var, foreground="#666")
+        self.update_status_label.pack(side=LEFT, padx=(6, 0), pady=4)
         donate_label = ttk.Label(bottom_bar, text="☕ Soutenir le projet", foreground="#0645AD", cursor="hand2")
         donate_label.pack(side=RIGHT, padx=8, pady=4)
         donate_label.bind("<Button-1>", lambda event: webbrowser.open(DONATE_URL))
+
+        self._update_check_queue = queue.Queue()
+        update_checker.start_update_check(APP_VERSION, UPDATE_REPO, self._update_check_queue)
+        self.root.after(500, self._poll_update_check)
+
+    def _poll_update_check(self):
+        try:
+            status, tag = self._update_check_queue.get_nowait()
+        except queue.Empty:
+            self.root.after(500, self._poll_update_check)
+            return
+        if status == "update_available":
+            self.update_status_var.set(f"Mise a jour disponible : {tag} - Telecharger")
+            self.update_status_label.configure(foreground="#0645AD", cursor="hand2")
+            self.update_status_label.bind("<Button-1>", lambda event: webbrowser.open(RELEASES_URL))
+        elif status == "up_to_date":
+            self.update_status_var.set("A jour")
+            self.update_status_label.configure(foreground="#1B7A1B", cursor="")
+        # "check_failed" (hors ligne, GitHub inaccessible...) : on ne
+        # revendique rien plutot que d'afficher a tort "a jour".
 
     def _build_detail_panel(self, parent):
         self.detail_placeholder = ttk.Label(
