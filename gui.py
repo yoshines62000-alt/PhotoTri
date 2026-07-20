@@ -6,9 +6,13 @@ Le scan (parcours disque + hachage) tourne sur un thread separe pour ne
 jamais geler l'interface sur une grosse bibliotheque : sqlite3 interdisant
 de reutiliser une connexion depuis un autre thread que celui qui l'a
 creee, le thread de scan ouvre sa PROPRE connexion vers le meme fichier
-(voir _scan_worker) plutot que de partager self.db - les deux connexions
-ne sont jamais actives en meme temps (self.db reste inutilisee pendant
-toute la duree du scan), donc aucun risque d'acces concurrent reel."""
+(voir _scan_worker) plutot que de partager self.db. Pendant toute la duree
+du scan, `_set_scan_controls_state("disabled")` desactive Deplacer,
+Changer..., Choisir un dossier et la selection de groupes - ce n'est PAS
+une simple precaution UX : sans ca, un clic sur Deplacer pendant un scan
+ferait ecrire self.db ET worker_db en meme temps sur le meme fichier
+(bug trouve a l'audit ; corrige egalement en defense en profondeur par le
+mode WAL + busy_timeout de db.py)."""
 
 from __future__ import annotations
 
@@ -16,7 +20,9 @@ import queue
 import shutil
 import sys
 import threading
+import traceback
 import webbrowser
+from datetime import datetime
 from pathlib import Path
 from tkinter import (
     BOTH, END, HORIZONTAL, LEFT, RIGHT, TOP, X, Y, VERTICAL,
@@ -98,14 +104,23 @@ class PhotoTriApp:
         self._scanning = False
         self._stop_event = threading.Event()
         self._queue: "queue.Queue" = queue.Queue()
+        self._scan_thread = None
         self._groups: list = []
         self._groups_by_iid: dict = {}
         self._selected_group = None
         self._thumbnail_refs: list = []
         self._checkbox_vars: dict = {}
+        self._grouping_in_progress = False
+        self._grouping_thread = None
+        self._grouping_queue: "queue.Queue" = queue.Queue()
+        self._pending_status_prefix = None
 
         self._build_layout()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+        # Filet de securite global : sans ceci, Tkinter avale silencieusement
+        # toute exception levee dans un callback (clic de bouton...),
+        # invisible dans l'exe package sans console - bug trouve a l'audit.
+        self.root.report_callback_exception = self._handle_callback_exception
 
     # -- construction de l'interface ---------------------------------------------
 
@@ -113,14 +128,24 @@ class PhotoTriApp:
         top = ttk.Frame(self.root)
         top.pack(fill=X, padx=10, pady=10)
 
-        ttk.Button(top, text="Choisir un dossier a analyser...", command=self._choose_folder).pack(side=LEFT)
+        self.choose_folder_button = ttk.Button(top, text="Choisir un dossier a analyser...", command=self._choose_folder)
+        self.choose_folder_button.pack(side=LEFT)
         self.folder_label_var = StringVar(value="Aucun dossier choisi")
         ttk.Label(top, textvariable=self.folder_label_var, foreground="black", font=BODY_FONT).pack(side=LEFT, padx=10)
 
         right_controls = ttk.Frame(top)
         right_controls.pack(side=RIGHT)
         ttk.Label(right_controls, text="Sensibilite quasi-doublons :", foreground="black", font=BODY_FONT).pack(side=LEFT)
-        ttk.Spinbox(right_controls, from_=0, to=20, textvariable=self.threshold_var, width=4).pack(side=LEFT, padx=(4, 10))
+        # validate="key" + validatecommand bloque toute saisie non numerique a
+        # la racine - bug trouve a l'audit : IntVar.get() levait TclError sur
+        # une saisie libre non numerique, plantage silencieux (aucune console
+        # dans l'exe package) du prochain recalcul de groupes.
+        validate_digits_cmd = self.root.register(self._validate_digits_input)
+        threshold_spinbox = ttk.Spinbox(
+            right_controls, from_=0, to=20, textvariable=self.threshold_var, width=4,
+            validate="key", validatecommand=(validate_digits_cmd, "%P"),
+        )
+        threshold_spinbox.pack(side=LEFT, padx=(4, 10))
         self.recompute_button = ttk.Button(right_controls, text="Recalculer les groupes", command=self._refresh_groups)
         self.recompute_button.pack(side=LEFT, padx=(0, 10))
         self.scan_button = ttk.Button(right_controls, text="Analyser (scanner)", command=self._start_scan, state="disabled")
@@ -187,11 +212,13 @@ class PhotoTriApp:
         action_bar.pack(fill=X, pady=(8, 0))
         ttk.Label(action_bar, text="Dossier de revision :", foreground="black", font=BODY_FONT).pack(side=LEFT)
         ttk.Entry(action_bar, textvariable=self.review_folder_var, width=45, state="readonly").pack(side=LEFT, padx=5)
-        ttk.Button(action_bar, text="Changer...", command=self._choose_review_folder).pack(side=LEFT)
-        ttk.Button(
+        self.change_review_button = ttk.Button(action_bar, text="Changer...", command=self._choose_review_folder)
+        self.change_review_button.pack(side=LEFT)
+        self.move_button = ttk.Button(
             action_bar, text="Deplacer les photos cochees vers le dossier de revision",
             command=self._move_checked_photos,
-        ).pack(side=RIGHT)
+        )
+        self.move_button.pack(side=RIGHT)
 
     # -- choix des dossiers --------------------------------------------------------
 
@@ -212,6 +239,22 @@ class PhotoTriApp:
 
     # -- scan (thread separe) ------------------------------------------------------
 
+    def _set_scan_controls_state(self, state: str) -> None:
+        """Active/desactive les controles qui ne doivent jamais etre utilises
+        pendant qu'un scan ecrit sur sa propre connexion SQLite (`worker_db`)
+        - bug trouve a l'audit : le bouton Deplacer, le bouton Changer... et
+        la selection de groupes restaient actifs pendant un scan, rendant
+        possible un acces concurrent reel a `phototri.sqlite` alors meme que
+        le commentaire en tete de fichier affirmait le contraire."""
+        self.recompute_button.configure(state=state)
+        self.choose_folder_button.configure(state=state)
+        self.move_button.configure(state=state)
+        self.change_review_button.configure(state=state)
+        if state == "disabled":
+            self.groups_tree.state(("disabled",))
+        else:
+            self.groups_tree.state(("!disabled",))
+
     def _start_scan(self):
         if self._scanning or self.selected_folder is None:
             return
@@ -219,11 +262,17 @@ class PhotoTriApp:
         self._stop_event.clear()
         self.scan_button.configure(state="disabled")
         self.stop_button.configure(state="normal")
-        self.recompute_button.configure(state="disabled")
-        self.progress_bar.configure(value=0, maximum=1)
+        self._set_scan_controls_state("disabled")
+        # Mode indetermine pendant le listing initial des fichiers (peut
+        # prendre du temps sur un tres gros dossier, avant le premier
+        # progress_callback) ; _poll_scan_queue bascule en mode determine
+        # des la premiere vraie progression recue.
+        self.progress_bar.configure(mode="indeterminate")
+        self.progress_bar.start(10)
         self.status_var.set("Analyse en cours...")
 
         thread = threading.Thread(target=self._scan_worker, args=(self.selected_folder,), daemon=True)
+        self._scan_thread = thread
         thread.start()
         self.root.after(100, self._poll_scan_queue)
 
@@ -232,8 +281,17 @@ class PhotoTriApp:
         self.status_var.set("Arret demande...")
 
     def _scan_worker(self, folder: Path):
-        worker_db = Database(self.db_path)
+        worker_db = None
         try:
+            # Construction de la connexion DEDANS le try - bug trouve a
+            # l'audit : si l'ouverture echoue (fichier verrouille, disque
+            # plein, chemin invalide...), l'exception n'etait interceptee
+            # nulle part, le thread mourait silencieusement (pas de console
+            # dans l'exe package) et rien n'etait jamais pousse dans la
+            # file, laissant l'app bloquee indefiniment sur "Analyse en
+            # cours..." avec les boutons desactives a vie.
+            worker_db = Database(self.db_path)
+
             def on_progress(done, total, path):
                 self._queue.put(("progress", done, total, path))
 
@@ -244,7 +302,8 @@ class PhotoTriApp:
         except Exception as exc:
             self._queue.put(("error", str(exc)))
         finally:
-            worker_db.close()
+            if worker_db is not None:
+                worker_db.close()
 
     def _poll_scan_queue(self):
         try:
@@ -253,6 +312,9 @@ class PhotoTriApp:
                 kind = message[0]
                 if kind == "progress":
                     _, done, total, path = message
+                    if str(self.progress_bar["mode"]) == "indeterminate":
+                        self.progress_bar.stop()
+                        self.progress_bar.configure(mode="determinate")
                     self.progress_bar.configure(value=done, maximum=max(total, 1))
                     self.status_var.set(f"{done} / {total} - {path}")
                 elif kind == "done":
@@ -262,7 +324,9 @@ class PhotoTriApp:
                     self._scanning = False
                     self.scan_button.configure(state="normal")
                     self.stop_button.configure(state="disabled")
-                    self.recompute_button.configure(state="normal")
+                    self._set_scan_controls_state("normal")
+                    self.progress_bar.stop()
+                    self.progress_bar.configure(mode="determinate")
                     messagebox.showerror(APP_TITLE, f"L'analyse a echoue :\n{message[1]}")
                     return
         except queue.Empty:
@@ -274,29 +338,94 @@ class PhotoTriApp:
         self._scanning = False
         self.scan_button.configure(state="normal")
         self.stop_button.configure(state="disabled")
-        self.recompute_button.configure(state="normal")
+        self._set_scan_controls_state("normal")
+        if str(self.progress_bar["mode"]) == "indeterminate":
+            self.progress_bar.stop()
+            self.progress_bar.configure(mode="determinate")
         summary = (
             f"Analyse terminee : {result.scanned} photo(s) indexee(s), "
             f"{result.skipped_unchanged} inchangee(s), {result.pruned} disparue(s) retiree(s) de l'index."
         )
         if result.errors:
             summary += f" {len(result.errors)} fichier(s) illisible(s) ignore(s)."
-        self.status_var.set(summary)
+        self._pending_status_prefix = summary
         self._refresh_groups()
 
     # -- regroupement et affichage --------------------------------------------------
 
+    @staticmethod
+    def _validate_digits_input(proposed: str) -> bool:
+        """Bloque toute saisie non numerique dans le Spinbox de sensibilite
+        AVANT qu'elle n'atteigne l'IntVar - bug trouve a l'audit :
+        `IntVar.get()` leve `TclError` sur une saisie libre non numerique
+        (le Spinbox n'a par defaut aucune limite sur la saisie clavier,
+        seulement sur les fleches), plantage silencieux du prochain calcul
+        de groupes (aucune console dans l'exe package pour le voir)."""
+        return proposed == "" or proposed.isdigit()
+
+    def _get_threshold(self) -> int:
+        """Lecture defensive de threshold_var : une chaine vide (champ en
+        cours d'edition) ou hors bornes (ex: saisie "9999", que
+        `_validate_digits_input` n'empeche pas puisqu'elle ne borne que les
+        CARACTERES, pas la valeur finale) ne doit jamais planter le calcul
+        de groupes ni forcer silencieusement le chemin exhaustif O(n^2)
+        (voir grouping.py) sans borne raisonnable."""
+        try:
+            value = self.threshold_var.get()
+        except Exception:
+            value = grouping.DEFAULT_NEAR_DUPLICATE_THRESHOLD
+            self.threshold_var.set(value)
+        return max(0, min(20, value))
+
     def _refresh_groups(self):
-        photos = self.db.list_active_photos()
-        self._groups = grouping.group_photos(list(photos), near_duplicate_threshold=self.threshold_var.get())
+        if self._grouping_in_progress or self._scanning:
+            return
+        photos = list(self.db.list_active_photos())
+        threshold = self._get_threshold()
+        self._grouping_in_progress = True
+        self.scan_button.configure(state="disabled")
+        self._set_scan_controls_state("disabled")
+        self.status_var.set("Calcul des groupes...")
+
+        def worker():
+            groups = grouping.group_photos(photos, near_duplicate_threshold=threshold)
+            self._grouping_queue.put(groups)
+
+        thread = threading.Thread(target=worker, daemon=True)
+        self._grouping_thread = thread
+        thread.start()
+        self.root.after(50, self._poll_grouping_queue)
+
+    def _poll_grouping_queue(self):
+        try:
+            groups = self._grouping_queue.get_nowait()
+        except queue.Empty:
+            self.root.after(50, self._poll_grouping_queue)
+            return
+        self._grouping_in_progress = False
+        self.scan_button.configure(state="normal")
+        self._set_scan_controls_state("normal")
+        self._apply_groups(groups)
+
+    def _apply_groups(self, groups: list) -> None:
+        self._groups = groups
         self._groups.sort(key=lambda g: (g.kind != "exact", -len(g.photo_ids)))
+        # Un seul appel a list_active_photos() puis un dict en memoire,
+        # plutot qu'un self.db.get_photo(pid) par photo par groupe -
+        # optimisation trouvee a l'audit (N+1 requetes SQLite), qui a aussi
+        # pour effet de securiser l'acces : une photo disparue entre le
+        # calcul des groupes et cet affichage est simplement absente du
+        # dict plutot que de faire planter `row["size"]` sur None.
+        photos_by_id = {p["id"]: p for p in self.db.list_active_photos()}
 
         self.groups_tree.delete(*self.groups_tree.get_children())
         self._groups_by_iid = {}
         for index, group in enumerate(self._groups):
             iid = str(index)
             self._groups_by_iid[iid] = group
-            total_size = sum((self.db.get_photo(pid)["size"] or 0) for pid in group.photo_ids)
+            total_size = sum(
+                (photos_by_id[pid]["size"] or 0) for pid in group.photo_ids if pid in photos_by_id
+            )
             label = "Exact" if group.kind == "exact" else "Quasi-doublon"
             self.groups_tree.insert("", END, iid=iid, values=(label, len(group.photo_ids), _format_size(total_size)))
 
@@ -305,6 +434,11 @@ class PhotoTriApp:
             self.detail_placeholder.configure(
                 text="Aucun doublon ni quasi-doublon trouve dans les photos indexees.",
             )
+
+        group_message = f"{len(self._groups)} groupe(s) de doublons/quasi-doublons trouve(s)."
+        prefix = self._pending_status_prefix
+        self._pending_status_prefix = None
+        self.status_var.set(f"{prefix} {group_message}" if prefix else group_message)
 
     def _on_group_select(self, event=None):
         selection = self.groups_tree.selection()
@@ -327,7 +461,19 @@ class PhotoTriApp:
         self.detail_placeholder.pack_forget()
         self.detail_frame.pack(fill=BOTH, expand=True)
 
-        photos = [self.db.get_photo(pid) for pid in group.photo_ids]
+        # Filtre les photos disparues depuis le calcul du groupe (deplacees
+        # hors de PhotoTri entre-temps, etc.) - bug trouve a l'audit :
+        # self.db.get_photo(pid) peut renvoyer None, et l'indexation directe
+        # photo["size"] plus bas plantait alors le callback (silencieusement,
+        # cf. _handle_callback_exception plus haut dans ce fichier).
+        photos = [p for p in (self.db.get_photo(pid) for pid in group.photo_ids) if p is not None]
+        if len(photos) < 2:
+            ttk.Label(
+                self.cards_inner,
+                text="Ce groupe n'est plus valide (photo(s) disparue(s) depuis le calcul - relancez une analyse).",
+                foreground="black", font=BODY_FONT, wraplength=500,
+            ).grid(row=0, column=0, padx=15, pady=15)
+            return
         keeper_id = grouping.suggest_keeper(photos)
 
         for column, photo in enumerate(photos):
@@ -341,6 +487,11 @@ class PhotoTriApp:
         thumb_label.pack()
         try:
             with Image.open(photo["path"]) as img:
+                # draft() accelere nettement le decodage JPEG quand on ne
+                # veut qu'une vignette (no-op silencieux sur les formats non
+                # JPEG) - optimisation trouvee a l'audit, le decodage pleine
+                # resolution etait fait pour rien avant le .thumbnail().
+                img.draft("RGB", THUMBNAIL_SIZE)
                 img = img.copy()
             img.thumbnail(THUMBNAIL_SIZE)
             photo_image = ImageTk.PhotoImage(img)
@@ -386,9 +537,15 @@ class PhotoTriApp:
             messagebox.showerror(APP_TITLE, f"Impossible de creer le dossier de revision :\n{exc}")
             return
 
-        moved, failed = 0, []
+        moved, failed, already_gone = 0, [], 0
         for photo_id in checked_ids:
             row = self.db.get_photo(photo_id)
+            if row is None:
+                # Deja disparue de l'index (deplacee/supprimee hors de
+                # PhotoTri entre l'affichage du groupe et ce clic) - rien a
+                # deplacer, ce n'est pas un echec a proprement parler.
+                already_gone += 1
+                continue
             source = Path(row["path"])
             dest = _unique_destination(review_dir, source.name)
             try:
@@ -400,6 +557,8 @@ class PhotoTriApp:
             moved += 1
 
         message = f"{moved} photo(s) deplacee(s) vers :\n{review_dir}"
+        if already_gone:
+            message += f"\n\n{already_gone} photo(s) etaient deja disparues de l'index (ignoree(s))."
         if failed:
             message += "\n\nEchec pour :\n" + "\n".join(f"- {name} ({err})" for name, err in failed)
             messagebox.showwarning(APP_TITLE, message)
@@ -412,8 +571,46 @@ class PhotoTriApp:
     def _on_close(self):
         if self._scanning:
             self._stop_event.set()
+            if self._scan_thread is not None:
+                # Attend (borne a 3s) que le thread de scan termine son
+                # ecriture SQLite en cours avant de fermer self.db et de
+                # detruire la fenetre - bug trouve a l'audit : sans ce join,
+                # le thread daemon pouvait etre tue brutalement par l'arret
+                # du process en pleine transaction sur `worker_db`.
+                self._scan_thread.join(timeout=3)
         self.db.close()
         self.root.destroy()
+
+    def _handle_callback_exception(self, exc_type, exc_value, exc_traceback):
+        """Filet de securite global : par defaut, Tkinter avale
+        silencieusement toute exception levee dans un callback (clic de
+        bouton, etc.) - invisible dans l'exe package sans console (bug
+        trouve a l'audit : plusieurs acces non defensifs pouvaient planter
+        un callback sans le moindre message pour l'utilisateur). On
+        journalise le detail dans un fichier ET on avertit l'utilisateur au
+        lieu de laisser l'application paraitre figee sans explication."""
+        message = "".join(traceback.format_exception(exc_type, exc_value, exc_traceback))
+        # Reutilise le dossier de donnees deja resout a l'ouverture
+        # (self.db_path.parent) plutot que de rappeler _data_dir() - cette
+        # derniere renvoie toujours le meme resultat en usage reel, mais
+        # architecturalement il n'y a aucune raison de re-deriver un chemin
+        # deja connu, et ca evite toute divergence si ce point d'entree est
+        # un jour rendu configurable.
+        log_path = self.db_path.parent / "erreurs.log"
+        try:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(f"\n--- {datetime.now().isoformat()} ---\n{message}\n")
+        except OSError:
+            pass
+        try:
+            messagebox.showerror(
+                APP_TITLE,
+                "Une erreur inattendue s'est produite. Les details ont ete "
+                f"enregistres dans :\n{log_path}",
+            )
+        except Exception:
+            pass
 
 
 def main():

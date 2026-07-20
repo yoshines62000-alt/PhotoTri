@@ -81,9 +81,11 @@ def scan_folder(
     files = list(_iter_image_files(root))
     result = ScanResult(total_found=len(files))
     seen_paths = set()
+    stopped_early = False
 
     for index, path in enumerate(files, start=1):
         if should_stop is not None and should_stop():
+            stopped_early = True
             break
         path_str = str(path)
         seen_paths.add(path_str)
@@ -119,9 +121,16 @@ def scan_folder(
         if progress_callback:
             progress_callback(index, result.total_found, path_str)
 
-    stale = db.list_paths_under(str(root)) - seen_paths
-    if stale:
-        db.delete_by_paths(list(stale))
-        result.pruned = len(stale)
+    # Un scan interrompu (bouton "Arreter", fermeture de la fenetre) n'a vu
+    # qu'une partie des fichiers reellement presents sur le disque - purger
+    # "les chemins en base mais pas vus" traiterait a tort tout fichier pas
+    # encore atteint comme disparu (bug trouve a l'audit : perte silencieuse
+    # de notes/statuts deja attribues, et faux groupes de doublons au
+    # prochain calcul). La purge n'a de sens que pour un scan complet.
+    if not stopped_early:
+        stale = db.list_paths_under(str(root)) - seen_paths
+        if stale:
+            db.delete_by_paths(list(stale))
+            result.pruned = len(stale)
 
     return result

@@ -117,6 +117,39 @@ class TestScanFolder(unittest.TestCase):
         self.assertEqual(result.scanned, 0)
         self.assertEqual(self.db.count_photos(), 0)
 
+    def test_interrupted_rescan_does_not_prune_unseen_files(self):
+        # Bug trouve a l'audit : un scan interrompu (bouton Arreter,
+        # fermeture de la fenetre) n'a vu qu'une partie des fichiers reels -
+        # traiter "en base mais pas vu" comme "disparu" purgeait a tort des
+        # photos toujours bien presentes sur le disque, avec perte
+        # silencieuse de leur note/statut deja attribue.
+        _make_photo(self.photos_dir / "a.jpg")
+        _make_photo(self.photos_dir / "b.jpg")
+        _make_photo(self.photos_dir / "c.jpg")
+        first = scanner.scan_folder(self.photos_dir, self.db)
+        self.assertEqual(first.scanned, 3)
+        self.assertEqual(self.db.count_photos(), 3)
+
+        # Arret apres le tout premier fichier traite - les 2 autres ne sont
+        # jamais "vus" durant ce second scan (should_stop est verifie au
+        # DEBUT de chaque iteration, avant de traiter le fichier suivant).
+        processed = {"count": 0}
+
+        def track_progress(done, total, path):
+            processed["count"] = done
+
+        def stop_after_one():
+            return processed["count"] >= 1
+
+        second = scanner.scan_folder(
+            self.photos_dir, self.db, progress_callback=track_progress, should_stop=stop_after_one,
+        )
+
+        self.assertEqual(second.pruned, 0)
+        self.assertEqual(self.db.count_photos(), 3, "aucune photo reelle ne doit etre purgee sur un scan interrompu")
+        for name in ("a.jpg", "b.jpg", "c.jpg"):
+            self.assertIsNotNone(self.db.get_photo_by_path(str(self.photos_dir / name)))
+
     def test_rating_survives_rescan_of_unchanged_file(self):
         path = self.photos_dir / "a.jpg"
         _make_photo(path)

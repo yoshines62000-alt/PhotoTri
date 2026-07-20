@@ -93,10 +93,35 @@ class TestDatabase(unittest.TestCase):
         self.assertIsNotNone(self.db.get_photo_by_path("C:/photos/b.jpg"))
 
     def test_list_paths_under_prefix(self):
-        self._upsert(path="C:/photos/vacances/a.jpg")
-        self._upsert(path="C:/photos/travail/b.jpg")
-        under_vacances = self.db.list_paths_under("C:/photos/vacances")
-        self.assertEqual(under_vacances, {"C:/photos/vacances/a.jpg"})
+        self._upsert(path="C:\\photos\\vacances\\a.jpg")
+        self._upsert(path="C:\\photos\\travail\\b.jpg")
+        under_vacances = self.db.list_paths_under("C:\\photos\\vacances")
+        self.assertEqual(under_vacances, {"C:\\photos\\vacances\\a.jpg"})
+
+    def test_list_paths_under_does_not_match_sibling_prefix_folder(self):
+        # Bug trouve a l'audit : "C:\Photos" ne doit PAS matcher
+        # "C:\PhotosBackup" (prefixe partiel du nom de dossier, pas un vrai
+        # sous-dossier) - sans frontiere de separateur, un rescan de
+        # "Photos" purgeait a tort l'index de "PhotosBackup".
+        self._upsert(path="C:\\Photos\\a.jpg")
+        self._upsert(path="C:\\PhotosBackup\\b.jpg")
+        under_photos = self.db.list_paths_under("C:\\Photos")
+        self.assertEqual(under_photos, {"C:\\Photos\\a.jpg"})
+
+    def test_list_paths_under_escapes_like_wildcards_in_folder_name(self):
+        # Bug trouve a l'audit : le "_" de LIKE est un joker un-caractere-
+        # quelconque - sans echappement, "Vacances_2024" matchait aussi
+        # "Vacances-2024" et "VacancesX2024".
+        self._upsert(path="C:\\Vacances_2024\\a.jpg")
+        self._upsert(path="C:\\Vacances-2024\\b.jpg")
+        self._upsert(path="C:\\VacancesX2024\\c.jpg")
+        under = self.db.list_paths_under("C:\\Vacances_2024")
+        self.assertEqual(under, {"C:\\Vacances_2024\\a.jpg"})
+
+    def test_list_paths_under_includes_nested_subfolders(self):
+        self._upsert(path="C:\\Photos\\2024\\ete\\a.jpg")
+        under = self.db.list_paths_under("C:\\Photos")
+        self.assertEqual(under, {"C:\\Photos\\2024\\ete\\a.jpg"})
 
 
 if __name__ == "__main__":

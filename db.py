@@ -49,6 +49,13 @@ class Database:
         path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(str(path))
         self.conn.row_factory = sqlite3.Row
+        # WAL : les lecteurs (ex: l'UI qui affiche des groupes) ne bloquent
+        # plus l'ecrivain (le thread de scan) et reciproquement. busy_timeout
+        # generereux en complement (au lieu de se fier au seul defaut de
+        # sqlite3.connect) : defense en profondeur si jamais un futur chemin
+        # de code venait a ouvrir deux connexions actives en meme temps.
+        self.conn.execute("PRAGMA journal_mode=WAL")
+        self.conn.execute("PRAGMA busy_timeout=10000")
         self._create_schema()
 
     def close(self) -> None:
@@ -72,7 +79,6 @@ class Database:
             scanned_at TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_photos_sha256 ON photos(sha256);
-        CREATE INDEX IF NOT EXISTS idx_photos_phash ON photos(phash);
         CREATE INDEX IF NOT EXISTS idx_photos_status ON photos(status);
         """)
         self.conn.commit()
@@ -138,12 +144,30 @@ class Database:
         return self.conn.execute("SELECT * FROM photos WHERE status = 'active' ORDER BY path").fetchall()
 
     def list_paths_under(self, root: str) -> set:
-        """Tous les chemins actuellement en base sous `root` (prefixe de
-        dossier) - utilise par scanner.py pour detecter, par difference
-        avec la liste reelle sur disque, les fichiers supprimes/deplaces
-        manuellement depuis le dernier scan et purger leur entree perimee."""
-        like_pattern = root.rstrip("\\/") + "%"
-        rows = self.conn.execute("SELECT path FROM photos WHERE path LIKE ?", (like_pattern,)).fetchall()
+        """Tous les chemins actuellement en base sous `root` (dossier) -
+        utilise par scanner.py pour detecter, par difference avec la liste
+        reelle sur disque, les fichiers supprimes/deplaces manuellement
+        depuis le dernier scan et purger leur entree perimee.
+
+        Le motif LIKE echappe les caracteres speciaux `%`/`_` presents dans
+        `root` lui-meme ET exige une frontiere de separateur de chemin apres
+        le prefixe - bug trouve a l'audit : sans ces deux garde-fous,
+        `D:\\Photos` matchait aussi `D:\\PhotosBackup` (prefixe partiel, pas
+        un sous-dossier) et `D:\\Vacances_2024` matchait aussi
+        `D:\\Vacances-2024` (le `_` de LIKE est un joker un-caractere-
+        quelconque) - un rescan purgeait alors de l'index des photos
+        totalement etrangeres au dossier scanne."""
+        root = root.rstrip("\\/")
+        escaped = root.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        # Le separateur ajoute ici doit LUI AUSSI etre une sequence d'echappement
+        # valide ("\\\\" = un backslash litteral echappe), pas juste un backslash
+        # brut : sous ESCAPE '\', un backslash brut juste avant "%" transformerait
+        # ce "%" en caractere litteral au lieu du joker attendu, empechant le
+        # motif de matcher quoi que ce soit sous le dossier.
+        pattern = escaped + "\\\\" + "%"
+        rows = self.conn.execute(
+            "SELECT path FROM photos WHERE path LIKE ? ESCAPE '\\'", (pattern,),
+        ).fetchall()
         return {row["path"] for row in rows}
 
     def count_photos(self) -> int:
