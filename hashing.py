@@ -16,6 +16,15 @@ import hashlib
 from pathlib import Path
 
 from PIL import Image, UnidentifiedImageError
+import pillow_heif
+
+# Enregistre l'ouvreur HEIF/HEIC de Pillow des l'import de ce module (qui est
+# le module le plus bas dans l'arbre d'import - gui.py importe scanner.py qui
+# importe hashing.py). Sans cet enregistrement, Pillow seul ne sait pas
+# ouvrir les .heic/.heif (aucun plugin HEIF integre) : Image.open() leve
+# UnidentifiedImageError sur toute photo iPhone, alors meme que ces
+# extensions figurent dans IMAGE_EXTENSIONS ci-dessous.
+pillow_heif.register_heif_opener()
 
 HASH_SIZE = 8  # -> hash de HASH_SIZE * HASH_SIZE bits (64 bits par defaut)
 

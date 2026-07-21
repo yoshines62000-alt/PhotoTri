@@ -98,6 +98,49 @@ class TestDHash(unittest.TestCase):
         self.assertEqual(hashing.hamming_distance(0b0000, 0b1111), 4)
 
 
+class TestHeicSupport(unittest.TestCase):
+    """Verifie que le HEIC/HEIF n'est pas seulement liste dans
+    IMAGE_EXTENSIONS mais reellement decodable de bout en bout : Pillow seul
+    n'a aucun plugin HEIF, c'est pillow_heif.register_heif_opener() (appele
+    a l'import de hashing.py) qui comble ce trou."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+
+    def test_heif_opener_registered_on_import(self):
+        # hashing est deja importe plus haut dans ce fichier : l'enregistrement
+        # a donc deja eu lieu. Pillow doit desormais connaitre .heic/.heif.
+        exts = Image.registered_extensions()
+        self.assertIn(".heic", exts)
+        self.assertIn(".heif", exts)
+
+    def test_heic_roundtrip_hash_computed(self):
+        # Genere un vrai fichier .heic (pas un .jpg renomme) et verifie que
+        # compute_dhash_from_path le decode et produit un hash exploitable,
+        # exactement comme pour un .png.
+        p = self.tmp / "gradient.heic"
+        _make_image(p, "gradient")
+        h = hashing.compute_dhash_from_path(p)
+        self.assertIsInstance(h, int)
+
+        p_png = self.tmp / "gradient.png"
+        _make_image(p_png, "gradient")
+        h_png = hashing.compute_dhash_from_path(p_png)
+        # Meme contenu visuel encode en HEIC vs PNG : hash perceptuel tres proche.
+        self.assertLessEqual(hashing.hamming_distance(h, h_png), 6)
+
+    def test_heic_thumbnail_openable(self):
+        # Simule l'usage fait par gui.py pour generer une vignette : ouvrir
+        # l'image et pouvoir la manipuler (thumbnail) sans exception.
+        p = self.tmp / "checker.heic"
+        _make_image(p, "checker")
+        with Image.open(p) as img:
+            img.load()
+            img.thumbnail((32, 32))
+            self.assertLessEqual(img.size[0], 32)
+            self.assertLessEqual(img.size[1], 32)
+
+
 class TestIsImageFile(unittest.TestCase):
     def test_recognizes_common_extensions(self):
         for name in ("photo.jpg", "photo.JPEG", "photo.png", "photo.webp", "photo.heic"):

@@ -28,6 +28,9 @@ accord.
   supprimés automatiquement.
 - **Scan incrémental** : un nouveau scan ne retraite que les fichiers
   nouveaux ou modifiés, rapide même sur une grosse bibliothèque.
+- **Formats pris en charge** : JPEG, PNG, BMP, GIF, TIFF, WebP, ainsi que
+  **HEIC/HEIF** (format par défaut des photos iPhone depuis 2017), grâce à
+  la dépendance `pillow-heif` incluse.
 - **100 % local, zéro cloud** : aucune connexion réseau, aucun compte,
   aucune télémétrie.
 - **Gratuit et open source, pour toujours**.
@@ -51,7 +54,9 @@ Alternative à l'exécutable, pour les développeurs ou par souci de
 transparence : double-cliquez sur **[`Lancer.vbs`](Lancer.vbs)** — la
 fenêtre s'ouvre directement, sans console.
 
-Une dépendance tierce est nécessaire (la bibliothèque `Pillow`) :
+Deux dépendances tierces sont nécessaires : `Pillow` pour le traitement
+d'image, et `pillow-heif` pour la lecture des photos HEIC/HEIF (format par
+défaut des iPhone) — Pillow seul n'a aucun plugin HEIF intégré.
 
 ```bash
 python -m pip install -r requirements.txt
@@ -123,7 +128,7 @@ scanner.py              # parcours recursif d'un dossier, lecture EXIF, hachage 
 grouping.py             # regroupement des doublons exacts et quasi-doublons
 gui.py                  # interface graphique Tkinter (scan en arriere-plan)
 tests/                  # tests automatises
-requirements.txt        # Pillow
+requirements.txt        # Pillow, pillow-heif (lecture HEIC/HEIF)
 Lancer.vbs              # raccourci de lancement double-clic (sans console)
 Lancer.bat              # raccourci de lancement double-clic (avec console, pour debug)
 PhotoTri.spec            # configuration de build PyInstaller (.exe autonome)
