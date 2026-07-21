@@ -88,12 +88,21 @@ class Database:
     def upsert_photo(
         self, path: str, size: int, mtime: float, width: Optional[int], height: Optional[int],
         sha256: str, phash: int, taken_at: Optional[str],
+        commit: bool = True,
     ) -> int:
         """Cree OU met a jour l'entree d'une photo (cle unique : `path`).
         Une mise a jour ne touche JAMAIS `rating`/`status`/`moved_to` : ce
         sont des annotations de l'utilisateur, pas des donnees derivees du
         fichier, elles doivent survivre a un rescan qui detecte juste que
-        le fichier a change de taille/date."""
+        le fichier a change de taille/date.
+
+        `commit=False` laisse l'ecriture dans la transaction SQLite en
+        cours sans la valider (fsync) immediatement - utilise par
+        scanner.py pour grouper les commits d'un scan en masse (voir
+        `Database.commit`) plutot que de payer un fsync disque a chaque
+        photo. Par defaut (True) le comportement est inchange : chaque
+        appel isole reste immediatement durable, ce qui garde tous les
+        autres appelants (tests, code futur) surs sans y penser."""
         self.conn.execute(
             """INSERT INTO photos (path, size, mtime, width, height, sha256, phash, taken_at, scanned_at)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -104,9 +113,17 @@ class Database:
                    taken_at = excluded.taken_at, scanned_at = excluded.scanned_at""",
             (path, size, mtime, width, height, sha256, phash_to_sqlite(phash), taken_at, _now_iso()),
         )
-        self.conn.commit()
+        if commit:
+            self.conn.commit()
         row = self.conn.execute("SELECT id FROM photos WHERE path = ?", (path,)).fetchone()
         return row["id"]
+
+    def commit(self) -> None:
+        """Valide (fsync) la transaction SQLite en cours. A appeler apres
+        une serie d'`upsert_photo(..., commit=False)` - typiquement par lot
+        pendant un scan - pour grouper les ecritures disque sans perdre le
+        travail deja fait si le processus s'arrete entre deux lots."""
+        self.conn.commit()
 
     def set_rating(self, photo_id: int, rating: int) -> None:
         if not 0 <= rating <= 5:

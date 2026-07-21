@@ -21,6 +21,13 @@ from db import Database
 _TAG_DATETIME_ORIGINAL = next((k for k, v in ExifTags.TAGS.items() if v == "DateTimeOriginal"), None)
 _TAG_DATETIME = next((k for k, v in ExifTags.TAGS.items() if v == "DateTime"), None)
 
+# Nombre d'upserts groupes dans une meme transaction SQLite pendant un scan,
+# au lieu d'un commit (fsync disque) a chaque photo. 200 est un compromis :
+# assez grand pour eliminer l'essentiel du cout de fsync sur une grosse
+# bibliotheque, assez petit pour qu'une interruption (Arreter, crash) ne
+# perde jamais plus qu'un lot de travail deja effectue.
+_COMMIT_BATCH_SIZE = 200
+
 
 @dataclass
 class ScanResult:
@@ -149,10 +156,25 @@ def scan_folder(
                 progress_callback(index, result.total_found, path_str)
             continue
 
-        db.upsert_photo(path_str, stat.st_size, stat.st_mtime, width, height, sha, phash, taken_at)
+        # commit=False : le fsync disque est differe et groupe (voir le
+        # commit periodique juste en dessous) plutot que paye a chaque
+        # photo - mesure a l'audit, ce commit par ligne dominait le temps
+        # d'un gros scan. Un commit final inconditionnel apres la boucle
+        # (et un commit ici tous les _COMMIT_BATCH_SIZE upserts) garantit
+        # qu'un arret/crash en cours de scan ne perd jamais plus qu'un lot
+        # deja traite, jamais tout le travail depuis le debut du scan.
+        db.upsert_photo(path_str, stat.st_size, stat.st_mtime, width, height, sha, phash, taken_at, commit=False)
         result.scanned += 1
+        if result.scanned % _COMMIT_BATCH_SIZE == 0:
+            db.commit()
         if progress_callback:
             progress_callback(index, result.total_found, path_str)
+
+    # Valide tout travail restant depuis le dernier commit groupe (moins de
+    # _COMMIT_BATCH_SIZE photos depuis lors) - sans ce commit final, ces
+    # dernieres photos scannees resteraient dans une transaction jamais
+    # validee et seraient perdues si le processus se terminait juste apres.
+    db.commit()
 
     # Un scan interrompu (bouton "Arreter", fermeture de la fenetre) n'a vu
     # qu'une partie des fichiers reellement presents sur le disque - purger

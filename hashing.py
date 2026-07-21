@@ -56,7 +56,18 @@ def compute_dhash(image: Image.Image, hash_size: int = HASH_SIZE) -> int:
     a (hash_size+1) x hash_size, puis encode 1 bit par pixel selon qu'il est
     plus clair ou plus sombre que son voisin de droite. Renvoie un entier de
     hash_size*hash_size bits, comparable via hamming_distance."""
-    small = image.convert("L").resize((hash_size + 1, hash_size), Image.LANCZOS)
+    target_size = (hash_size + 1, hash_size)
+    # draft() demande au decodeur JPEG de ne decoder qu'a une resolution
+    # proche de la cible (le plus proche facteur 1/1, 1/2, 1/4, 1/8...) au
+    # lieu de decoder en pleine resolution avant de reduire - le hash final
+    # est de toute facon calcule sur une grille hash_size x hash_size, donc
+    # les details perdus par ce sous-echantillonnage anticipe n'affectent
+    # pas le resultat au-dela d'une tolerance de quelques bits (mesure a
+    # l'audit). Sans effet sur les formats non-JPEG (no-op silencieux -
+    # PNG/BMP/etc. continuent d'etre decodes en pleine resolution, sans
+    # regression de vitesse ni de resultat par rapport a avant ce correctif).
+    image.draft("RGB", target_size)
+    small = image.convert("L").resize(target_size, Image.LANCZOS)
     pixels = list(small.getdata())
     bits = 0
     for row in range(hash_size):

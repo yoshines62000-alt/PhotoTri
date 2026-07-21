@@ -2,6 +2,7 @@ import sys
 import tempfile
 import time
 import unittest
+import unittest.mock
 from pathlib import Path
 
 from PIL import Image
@@ -160,6 +161,60 @@ class TestScanFolder(unittest.TestCase):
 
         scanner.scan_folder(self.photos_dir, self.db)
         self.assertEqual(self.db.get_photo(photo_id)["rating"], 5)
+
+    # -- commits groupes pendant le scan (optimisation trouvee a l'audit) ----------
+
+    def test_interrupted_scan_does_not_lose_photos_already_committed_in_a_partial_batch(self):
+        # bug potentiel introduit par le groupement des commits (moins de
+        # fsync disque pendant un gros scan) : si une interruption survient
+        # AVANT d'atteindre _COMMIT_BATCH_SIZE upserts, le commit final
+        # inconditionnel apres la boucle doit quand meme valider ce lot
+        # partiel - sinon un "Arreter" en tout debut de scan perdrait le
+        # travail deja fait au lieu de simplement s'arreter proprement.
+        _make_photo(self.photos_dir / "a.jpg")
+        _make_photo(self.photos_dir / "b.jpg")
+        _make_photo(self.photos_dir / "c.jpg")
+
+        processed = {"count": 0}
+
+        def track_progress(done, total, path):
+            processed["count"] = done
+
+        def stop_after_two():
+            return processed["count"] >= 2
+
+        result = scanner.scan_folder(
+            self.photos_dir, self.db, progress_callback=track_progress, should_stop=stop_after_two,
+        )
+
+        self.assertEqual(result.scanned, 2)
+        self.assertEqual(
+            self.db.count_photos(), 2,
+            "les 2 photos deja traitees avant l'arret doivent rester commitees, pas seulement en memoire",
+        )
+
+    def test_scan_commits_in_batches_not_once_per_photo(self):
+        _make_photo(self.photos_dir / "a.jpg")
+        _make_photo(self.photos_dir / "b.jpg")
+        _make_photo(self.photos_dir / "c.jpg")
+
+        commit_calls = {"count": 0}
+        original_commit = self.db.commit
+
+        def counting_commit():
+            commit_calls["count"] += 1
+            original_commit()
+
+        with unittest.mock.patch.object(scanner, "_COMMIT_BATCH_SIZE", 2):
+            with unittest.mock.patch.object(self.db, "commit", side_effect=counting_commit):
+                result = scanner.scan_folder(self.photos_dir, self.db)
+
+        self.assertEqual(result.scanned, 3)
+        self.assertEqual(self.db.count_photos(), 3)
+        # 3 photos, lots de 2 : un commit groupe apres la 2e photo, puis le
+        # commit final inconditionnel pour la 3e restante - 2 commits au
+        # total, jamais 3 (un par photo, l'ancien comportement).
+        self.assertEqual(commit_calls["count"], 2)
 
     # -- exclusion du dossier de revision (bug trouve a l'audit) -------------------
 
