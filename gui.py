@@ -24,6 +24,7 @@ import traceback
 import webbrowser
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 from tkinter import (
     BOTH, END, HORIZONTAL, LEFT, RIGHT, TOP, X, Y, VERTICAL,
     BooleanVar, Canvas, IntVar, StringVar, Tk, Toplevel, ttk, filedialog, messagebox,
@@ -258,7 +259,15 @@ class PhotoTriApp:
         self.folder_label_var.set(str(self.selected_folder))
         self.scan_button.configure(state="normal")
         if not self.review_folder_var.get():
-            self.review_folder_var.set(str(self.selected_folder / "PhotoTri_a_revoir"))
+            # A cote du dossier scanne, PAS dedans - bug trouve a l'audit :
+            # un defaut a l'interieur du dossier scanne faisait reindexer
+            # comme photos actives neuves les doublons "ranges" (deplaces
+            # non destructivement) des le rescan suivant, annulant
+            # l'interet du rangement. scan_folder exclut en plus
+            # activement ce dossier du parcours (defense en profondeur),
+            # y compris si l'utilisateur le replace manuellement dedans
+            # via "Changer...".
+            self.review_folder_var.set(str(self.selected_folder.parent / f"{self.selected_folder.name}_PhotoTri_a_revoir"))
 
     def _choose_review_folder(self):
         chosen = filedialog.askdirectory(title="Choisir le dossier de revision (destination des doublons deplaces)")
@@ -299,7 +308,16 @@ class PhotoTriApp:
         self.progress_bar.start(10)
         self.status_var.set("Analyse en cours...")
 
-        thread = threading.Thread(target=self._scan_worker, args=(self.selected_folder,), daemon=True)
+        # Capture depuis le thread principal (Tkinter StringVar) avant de
+        # lancer le thread de scan : le dossier de revision courant, quel
+        # que soit son emplacement choisi par l'utilisateur, est exclu du
+        # parcours pour qu'un doublon deplace la ne revienne jamais polluer
+        # l'index au rescan suivant (voir _iter_image_files).
+        review_folder = self.review_folder_var.get()
+        exclude_dir = Path(review_folder) if review_folder else None
+        thread = threading.Thread(
+            target=self._scan_worker, args=(self.selected_folder, exclude_dir), daemon=True,
+        )
         self._scan_thread = thread
         thread.start()
         self.root.after(100, self._poll_scan_queue)
@@ -308,7 +326,7 @@ class PhotoTriApp:
         self._stop_event.set()
         self.status_var.set("Arret demande...")
 
-    def _scan_worker(self, folder: Path):
+    def _scan_worker(self, folder: Path, exclude_dir: Optional[Path] = None):
         worker_db = None
         try:
             # Construction de la connexion DEDANS le try - bug trouve a
@@ -325,6 +343,7 @@ class PhotoTriApp:
 
             result = scanner.scan_folder(
                 folder, worker_db, progress_callback=on_progress, should_stop=self._stop_event.is_set,
+                exclude_dir=exclude_dir,
             )
             self._queue.put(("done", result))
         except Exception as exc:

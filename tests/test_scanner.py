@@ -9,6 +9,7 @@ from PIL import Image
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from db import Database
+import grouping
 import scanner
 
 _TAG_DATETIME_ORIGINAL = 36867
@@ -159,6 +160,97 @@ class TestScanFolder(unittest.TestCase):
 
         scanner.scan_folder(self.photos_dir, self.db)
         self.assertEqual(self.db.get_photo(photo_id)["rating"], 5)
+
+    # -- exclusion du dossier de revision (bug trouve a l'audit) -------------------
+
+    def test_exclude_dir_is_skipped_when_inside_scanned_folder(self):
+        # Le dossier de revision, meme place manuellement a l'interieur du
+        # dossier scanne, ne doit jamais etre parcouru : c'est la defense en
+        # profondeur qui protege l'utilisateur meme si le defaut (a cote du
+        # dossier scanne, pas dedans) a ete change manuellement.
+        review_dir = self.photos_dir / "PhotoTri_a_revoir"
+        review_dir.mkdir()
+        _make_photo(self.photos_dir / "a.jpg")
+        _make_photo(review_dir / "b_range.jpg")
+
+        result = scanner.scan_folder(self.photos_dir, self.db, exclude_dir=review_dir)
+
+        self.assertEqual(result.total_found, 1)
+        self.assertEqual(result.scanned, 1)
+        self.assertEqual(self.db.count_photos(), 1)
+        self.assertIsNotNone(self.db.get_photo_by_path(str(self.photos_dir / "a.jpg")))
+        self.assertIsNone(self.db.get_photo_by_path(str(review_dir / "b_range.jpg")))
+
+    def test_exclude_dir_nested_deeper_is_also_skipped(self):
+        review_dir = self.photos_dir / "sous_dossier" / "PhotoTri_a_revoir"
+        review_dir.mkdir(parents=True)
+        _make_photo(self.photos_dir / "sous_dossier" / "a.jpg")
+        _make_photo(review_dir / "b_range.jpg")
+
+        result = scanner.scan_folder(self.photos_dir, self.db, exclude_dir=review_dir)
+
+        self.assertEqual(result.total_found, 1)
+        self.assertIsNone(self.db.get_photo_by_path(str(review_dir / "b_range.jpg")))
+
+    def test_exclude_dir_outside_scanned_folder_has_no_effect(self):
+        # Cas du nouveau defaut (a cote du dossier scanne) : exclude_dir
+        # n'existe meme pas sous root, le parcours n'est pas affecte.
+        review_dir = self.tmp / "photos_PhotoTri_a_revoir"
+        _make_photo(self.photos_dir / "a.jpg")
+
+        result = scanner.scan_folder(self.photos_dir, self.db, exclude_dir=review_dir)
+
+        self.assertEqual(result.total_found, 1)
+        self.assertEqual(result.scanned, 1)
+
+    def test_exclude_dir_none_scans_everything_as_before(self):
+        _make_photo(self.photos_dir / "a.jpg")
+        result = scanner.scan_folder(self.photos_dir, self.db, exclude_dir=None)
+        self.assertEqual(result.total_found, 1)
+        self.assertEqual(result.scanned, 1)
+
+    def test_moved_duplicate_does_not_reappear_after_rescan(self):
+        # Reproduction complete de la sequence decrite a l'audit :
+        # 1) scan initial avec 2 photos identiques -> 1 groupe exact
+        # 2) deplacement non destructif d'un exemplaire vers le dossier de
+        #    revision par defaut (a l'interieur du dossier scanne, comme
+        #    c'etait le cas AVANT ce correctif)
+        # 3) rescan normal (recommande par le README)
+        # 4) regroupement : le doublon range ne doit PLUS reapparaitre.
+        review_dir = self.photos_dir / "PhotoTri_a_revoir"
+        original = self.photos_dir / "photo.jpg"
+        duplicate = self.photos_dir / "photo_copie.jpg"
+        _make_photo(original, color=(50, 100, 150))
+        _make_photo(duplicate, color=(50, 100, 150))
+
+        first_scan = scanner.scan_folder(self.photos_dir, self.db, exclude_dir=review_dir)
+        self.assertEqual(first_scan.scanned, 2)
+        photos = list(self.db.list_active_photos())
+        groups = grouping.group_photos(photos)
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(groups[0].kind, "exact")
+        self.assertEqual(len(groups[0].photo_ids), 2)
+
+        # Rangement non destructif : deplacement physique + purge en base de
+        # l'ancien chemin, exactement comme le fait _move_checked_photos.
+        review_dir.mkdir(parents=True, exist_ok=True)
+        moved_path = review_dir / duplicate.name
+        duplicate.rename(moved_path)
+        self.db.delete_by_paths([str(duplicate)])
+
+        second_scan = scanner.scan_folder(self.photos_dir, self.db, exclude_dir=review_dir)
+
+        # Le fichier deplace ne doit pas avoir ete reindexe comme photo active.
+        self.assertIsNone(self.db.get_photo_by_path(str(moved_path)))
+        self.assertIsNotNone(self.db.get_photo_by_path(str(original)))
+        self.assertEqual(self.db.count_photos(), 1)
+
+        photos_after = list(self.db.list_active_photos())
+        groups_after = grouping.group_photos(photos_after)
+        self.assertEqual(
+            groups_after, [],
+            "le doublon range ne doit pas reapparaitre dans un groupe apres rescan",
+        )
 
 
 if __name__ == "__main__":

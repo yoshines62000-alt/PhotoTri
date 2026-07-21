@@ -51,8 +51,35 @@ def _extract_taken_at(img: Image.Image) -> Optional[str]:
         return None
 
 
-def _iter_image_files(root: Path):
-    for dirpath, _dirnames, filenames in os.walk(root):
+def _iter_image_files(root: Path, exclude_dir: Optional[Path] = None):
+    """Parcourt `root` recursivement. Si `exclude_dir` est fourni et se
+    trouve sous `root` (ou est confondu avec `root`), tout le sous-arbre
+    correspondant est ignore - c'est ce qui empeche le dossier de revision
+    (destination des photos "rangees" non destructivement) de se faire
+    reindexer comme des photos actives neuves quand il est place a
+    l'interieur meme du dossier scanne (bug trouve a l'audit : un doublon
+    deplace vers ce dossier revenait polluer l'index au rescan suivant,
+    annulant l'interet du rangement)."""
+    exclude_resolved = None
+    if exclude_dir is not None:
+        try:
+            exclude_resolved = Path(exclude_dir).resolve()
+        except OSError:
+            exclude_resolved = Path(exclude_dir)
+
+    for dirpath, dirnames, filenames in os.walk(root):
+        if exclude_resolved is not None:
+            current = Path(dirpath).resolve()
+            if current == exclude_resolved or exclude_resolved in current.parents:
+                dirnames[:] = []
+                continue
+            # Empeche aussi de descendre DANS le dossier exclu depuis un
+            # parent : on filtre les sous-dossiers enfants avant que
+            # os.walk n'y entre, plutot que de le detecter apres coup.
+            dirnames[:] = [
+                d for d in dirnames
+                if (Path(dirpath) / d).resolve() != exclude_resolved
+            ]
         for name in filenames:
             path = Path(dirpath) / name
             if hashing.is_image_file(path):
@@ -63,6 +90,7 @@ def scan_folder(
     root: Path, db: Database,
     progress_callback: Optional[Callable[[int, int, str], None]] = None,
     should_stop: Optional[Callable[[], bool]] = None,
+    exclude_dir: Optional[Path] = None,
 ) -> ScanResult:
     """Scanne `root` recursivement et indexe chaque photo dans `db`.
 
@@ -73,12 +101,17 @@ def scan_folder(
     appelant - un scan peut prendre plusieurs minutes sur une grosse
     bibliotheque, l'utilisateur doit pouvoir l'interrompre.
 
+    `exclude_dir`, s'il est fourni, delimite un sous-arbre entierement
+    ignore du parcours (typiquement le dossier de revision courant) - meme
+    s'il se trouve a l'interieur de `root`, ce qui peut arriver si
+    l'utilisateur l'a place la manuellement.
+
     En fin de scan, toute entree deja en base sous `root` mais dont le
     fichier n'a pas ete retrouve sur le disque est purgee (suppression
     manuelle depuis le dernier scan) - sans consequence sur les vraies
     photos, uniquement sur l'index reconstructible."""
     root = Path(root)
-    files = list(_iter_image_files(root))
+    files = list(_iter_image_files(root, exclude_dir=exclude_dir))
     result = ScanResult(total_found=len(files))
     seen_paths = set()
     stopped_early = False
