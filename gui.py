@@ -39,7 +39,7 @@ from db import Database
 
 APP_TITLE = "PhotoTri"
 DONATE_URL = "https://ko-fi.com/yoshines62000"
-APP_VERSION = "1.0.2"
+APP_VERSION = "1.0.3"
 UPDATE_REPO = "yoshines62000-alt/PhotoTri"
 RELEASES_URL = f"https://github.com/{UPDATE_REPO}/releases/latest"
 THUMBNAIL_SIZE = (150, 150)
