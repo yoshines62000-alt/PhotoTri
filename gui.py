@@ -66,6 +66,57 @@ def _format_size(num_bytes: int) -> str:
     return f"{size:.1f} Go"
 
 
+def _friendly_error_text(exc: BaseException) -> str:
+    """Traduit une exception technique (message brut Python/Pillow/OS,
+    presque toujours en anglais et parfois anxiogene hors contexte - ex.
+    "decompression bomb DOS attack", codes WinError bruts) en une phrase
+    generique en francais adaptee a un public non technique (bug trouve a
+    l'audit, C3). Le detail technique complet n'est jamais perdu : il reste
+    enregistre dans erreurs.log (voir _log_technical_error), simplement
+    plus impose en premiere lecture dans une boite de dialogue. Le
+    classement ci-dessous est deliberement approximatif (recherche de
+    sous-chaines dans le type ET le message de l'exception) plutot qu'une
+    correspondance exhaustive type-par-type : le but n'est pas de
+    diagnostiquer precisement l'erreur, juste d'eviter d'exposer du texte
+    technique brut quand une categorie usuelle est reconnaissable, avec un
+    message generique en dernier recours."""
+    detail = f"{type(exc).__name__} {exc}".lower()
+    if (
+        "decompressionbomb" in detail
+        or "unidentifiedimage" in detail
+        or "unreadableimage" in detail
+        or "cannot identify image file" in detail
+    ):
+        return "Un ou plusieurs fichiers semblent corrompus ou dans un format inattendu."
+    if (
+        isinstance(exc, PermissionError)
+        or "permission" in detail
+        or "acces refuse" in detail
+        or "access is denied" in detail
+        or "winerror 5" in detail
+    ):
+        return "Acces refuse a un fichier ou un dossier (verifiez les droits d'acces)."
+    if (
+        "no space left" in detail
+        or "disk full" in detail
+        or "winerror 112" in detail
+        or "espace disque" in detail
+    ):
+        return "Espace disque insuffisant."
+    if (
+        isinstance(exc, FileNotFoundError)
+        or "no such file" in detail
+        or "winerror 2" in detail
+        or "winerror 3" in detail
+    ):
+        return "Un fichier ou un dossier attendu est introuvable (peut-etre deplace ou supprime entre-temps)."
+    if "database is locked" in detail or "sqlite" in detail:
+        return "La base de donnees de PhotoTri est temporairement inaccessible (reessayez dans un instant)."
+    if isinstance(exc, OSError):
+        return "Un probleme d'acces au disque ou aux fichiers est survenu."
+    return "Une erreur inattendue est survenue."
+
+
 class _Tooltip:
     """Info-bulle minimale (Tkinter n'en fournit pas nativement) : affiche
     `text_getter()` dans une petite fenetre sans decoration au survol de
@@ -139,7 +190,7 @@ class PhotoTriApp:
         try:
             self.db = Database(self.db_path)
         except Exception as exc:
-            messagebox.showerror(APP_TITLE, f"Impossible d'ouvrir l'index de PhotoTri :\n{exc}")
+            self._show_friendly_error("Impossible d'ouvrir l'index de PhotoTri", exc)
             self.root.destroy()
             raise SystemExit(1)
 
@@ -321,8 +372,19 @@ class PhotoTriApp:
         ttk.Entry(action_bar, textvariable=self.review_folder_var, width=45, state="readonly").pack(side=LEFT, padx=5)
         self.change_review_button = ttk.Button(action_bar, text="Changer...", command=self._choose_review_folder)
         self.change_review_button.pack(side=LEFT)
+        # Libelle raccourci (bug trouve a l'audit, F2) : le texte complet
+        # "Deplacer les photos cochees vers le dossier de revision" se
+        # retrouvait compresse en dessous de sa largeur naturelle des que
+        # l'espace manquait dans la barre d'action - ttk.Button ne
+        # redimensionne pas son texte, il le laisse simplement deborder de
+        # son propre cadre (derniere(s) lettre(s) coupees), en particulier
+        # a la taille minimale officiellement supportee par l'application
+        # (root.minsize(850, 550)). Le contexte "vers le dossier de
+        # revision" reste de toute facon deja visible juste a gauche via le
+        # champ "Dossier de revision :", ce qui rend la version longue
+        # redondante.
         self.move_button = ttk.Button(
-            action_bar, text="Deplacer les photos cochees vers le dossier de revision",
+            action_bar, text="Deplacer la selection",
             command=self._move_checked_photos,
         )
         self.move_button.pack(side=RIGHT)
@@ -481,7 +543,13 @@ class PhotoTriApp:
             )
             self._queue.put(("done", result))
         except Exception as exc:
-            self._queue.put(("error", str(exc)))
+            # L'exception elle-meme est poussee dans la file (pas juste son
+            # texte) : _poll_scan_queue, sur le thread principal, en tire un
+            # message francais generique via _show_friendly_error plutot que
+            # d'afficher tel quel le texte brut de l'exception (bug trouve a
+            # l'audit, C3) - le detail technique complet part dans
+            # erreurs.log, jamais perdu.
+            self._queue.put(("error", exc))
         finally:
             if worker_db is not None:
                 worker_db.close()
@@ -508,7 +576,7 @@ class PhotoTriApp:
                     self._set_scan_controls_state("normal")
                     self.progress_bar.stop()
                     self.progress_bar.configure(mode="determinate")
-                    messagebox.showerror(APP_TITLE, f"L'analyse a echoue :\n{message[1]}")
+                    self._show_friendly_error("L'analyse a echoue", message[1])
                     return
         except queue.Empty:
             pass
@@ -782,8 +850,58 @@ class PhotoTriApp:
         try:
             review_dir.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
-            messagebox.showerror(APP_TITLE, f"Impossible de creer le dossier de revision :\n{exc}")
+            self._show_friendly_error("Impossible de creer le dossier de revision", exc)
             return
+
+        # Verification prealable de l'espace disque disponible sur le
+        # volume de destination (bug trouve a l'audit, E5) : avant ce
+        # correctif, aucune verification n'avait lieu avant de lancer la
+        # boucle de shutil.move ci-dessous - un lot de grosses photos qui
+        # epuise l'espace disque a mi-chemin suit le meme chemin de code
+        # (et la meme famille de risque de copie partielle) que E4. Les
+        # photos deja disparues de l'index (already_gone, comptees dans la
+        # boucle plus bas) ne sont pas connues a ce stade ; les compter
+        # dans l'estimation ferait sous-estimer legerement l'espace
+        # necessaire, jamais le sur-estimer - au pire un avertissement
+        # legerement trop prudent, jamais un oubli de verification.
+        try:
+            review_dev = review_dir.stat().st_dev
+        except OSError:
+            review_dev = None
+        required_bytes = 0
+        for photo_id in checked_ids:
+            row = self.db.get_photo(photo_id)
+            if row is None:
+                continue
+            try:
+                source_stat = Path(row["path"]).stat()
+            except OSError:
+                # Fichier deja disparu du disque : sera de toute facon
+                # compte comme "deja disparu" dans la boucle de deplacement
+                # ci-dessous, sans consommer d'espace disque.
+                continue
+            if review_dev is not None and source_stat.st_dev == review_dev:
+                # Meme volume que la source : shutil.move empruntera le
+                # chemin os.rename() atomique (voir commentaire plus bas sur
+                # E4), qui ne copie rien et ne consomme donc pas d'espace
+                # disque supplementaire - ne pas le compter evite un
+                # avertissement "espace insuffisant" sans objet dans le cas
+                # le plus courant (dossier de revision place par defaut a
+                # cote du dossier scanne, meme volume que lui).
+                continue
+            required_bytes += source_stat.st_size
+        try:
+            free_bytes = shutil.disk_usage(review_dir).free
+        except OSError:
+            free_bytes = None
+        if free_bytes is not None and required_bytes > free_bytes:
+            if not messagebox.askyesno(
+                APP_TITLE,
+                "Espace disque insuffisant sur le volume de destination :\n"
+                f"{_format_size(required_bytes)} necessaire(s), {_format_size(free_bytes)} disponible(s) "
+                f"dans :\n{review_dir}\n\nContinuer quand meme ?",
+            ):
+                return
 
         moved, failed, already_gone, orphan_copies = 0, [], 0, []
         for photo_id in checked_ids:
@@ -837,7 +955,13 @@ class PhotoTriApp:
                     # eu lieu.
                     self.db.mark_moved(photo_id, str(dest))
                     moved += 1
-                    orphan_copies.append((source.name, str(exc)))
+                    # L'exception elle-meme est conservee (pas seulement son
+                    # texte) : elle est traduite en phrase francaise
+                    # generique au moment de construire le message final
+                    # (bug trouve a l'audit, C3), le detail technique brut
+                    # partant dans erreurs.log plutot que dans la boite de
+                    # dialogue.
+                    orphan_copies.append((source.name, exc))
                     continue
 
                 # Echec de copie proprement dit (pas seulement de la
@@ -849,7 +973,7 @@ class PhotoTriApp:
                         dest.unlink()
                     except OSError:
                         pass
-                failed.append((source.name, str(exc)))
+                failed.append((source.name, exc))
                 continue
             self.db.mark_moved(photo_id, str(dest))
             moved += 1
@@ -857,14 +981,29 @@ class PhotoTriApp:
         message = f"{moved} photo(s) deplacee(s) vers :\n{review_dir}"
         if already_gone:
             message += f"\n\n{already_gone} photo(s) etaient deja disparues de l'index (ignoree(s))."
+        # Le texte brut de chaque exception (souvent anglais/technique) part
+        # dans erreurs.log via _log_technical_error plutot que d'etre
+        # affiche tel quel (bug trouve a l'audit, C3) - seule une phrase
+        # francaise generique (_friendly_error_text) apparait a cote du nom
+        # de fichier concerne dans la boite de dialogue.
+        log_path = None
         if orphan_copies:
+            for name, exc in orphan_copies:
+                log_path = self._log_technical_error(f"{name}: {type(exc).__name__}: {exc}")
             message += (
                 "\n\nCopiees dans le dossier de revision, mais l'original n'a PAS pu etre "
                 "supprime (verifiez les droits d'acces sur la source) :\n"
-                + "\n".join(f"- {name} ({err})" for name, err in orphan_copies)
+                + "\n".join(f"- {name} ({_friendly_error_text(exc)})" for name, exc in orphan_copies)
             )
         if failed:
-            message += "\n\nEchec pour :\n" + "\n".join(f"- {name} ({err})" for name, err in failed)
+            for name, exc in failed:
+                log_path = self._log_technical_error(f"{name}: {type(exc).__name__}: {exc}")
+            message += (
+                "\n\nEchec pour :\n"
+                + "\n".join(f"- {name} ({_friendly_error_text(exc)})" for name, exc in failed)
+            )
+        if log_path is not None:
+            message += f"\n\n(Details techniques enregistres dans {log_path})"
         if failed or orphan_copies:
             messagebox.showwarning(APP_TITLE, message)
         else:
@@ -886,6 +1025,44 @@ class PhotoTriApp:
         self.db.close()
         self.root.destroy()
 
+    def _log_technical_error(self, detail: str) -> Path:
+        """Enregistre un detail technique complet (texte brut d'exception,
+        trace le cas echeant) dans erreurs.log, horodate - mecanisme
+        d'origine introduit pour _handle_callback_exception, factorise ici
+        (bug trouve a l'audit, C3) pour etre reutilise par toute boite de
+        dialogue d'erreur qui ne doit plus exposer ce texte brut
+        directement a l'utilisateur (voir _show_friendly_error).
+        Reutilise le dossier de donnees deja resolu a l'ouverture
+        (self.db_path.parent) plutot que de rappeler _data_dir() - cette
+        derniere renvoie toujours le meme resultat en usage reel, mais
+        architecturalement il n'y a aucune raison de re-deriver un chemin
+        deja connu, et ca evite toute divergence si ce point d'entree est
+        un jour rendu configurable."""
+        log_path = self.db_path.parent / "erreurs.log"
+        try:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(f"\n--- {datetime.now().isoformat()} ---\n{detail}\n")
+        except OSError:
+            pass
+        return log_path
+
+    def _show_friendly_error(self, title_prefix: str, exc: BaseException) -> None:
+        """Affiche une erreur a l'utilisateur en francais courant plutot
+        que le texte brut (souvent anglais et technique) de l'exception
+        (bug trouve a l'audit, C3 : un message comme "decompression bomb
+        DOS attack" est anxiogene hors contexte pour un public non
+        technique) - le detail technique complet part dans erreurs.log via
+        _log_technical_error, jamais perdu, simplement plus impose en
+        premiere lecture."""
+        detail = f"{type(exc).__name__}: {exc}"
+        log_path = self._log_technical_error(detail)
+        friendly = _friendly_error_text(exc)
+        messagebox.showerror(
+            APP_TITLE,
+            f"{title_prefix} :\n{friendly}\n\n(Details techniques enregistres dans {log_path})",
+        )
+
     def _handle_callback_exception(self, exc_type, exc_value, exc_traceback):
         """Filet de securite global : par defaut, Tkinter avale
         silencieusement toute exception levee dans un callback (clic de
@@ -895,19 +1072,7 @@ class PhotoTriApp:
         journalise le detail dans un fichier ET on avertit l'utilisateur au
         lieu de laisser l'application paraitre figee sans explication."""
         message = "".join(traceback.format_exception(exc_type, exc_value, exc_traceback))
-        # Reutilise le dossier de donnees deja resout a l'ouverture
-        # (self.db_path.parent) plutot que de rappeler _data_dir() - cette
-        # derniere renvoie toujours le meme resultat en usage reel, mais
-        # architecturalement il n'y a aucune raison de re-deriver un chemin
-        # deja connu, et ca evite toute divergence si ce point d'entree est
-        # un jour rendu configurable.
-        log_path = self.db_path.parent / "erreurs.log"
-        try:
-            log_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(log_path, "a", encoding="utf-8") as f:
-                f.write(f"\n--- {datetime.now().isoformat()} ---\n{message}\n")
-        except OSError:
-            pass
+        log_path = self._log_technical_error(message)
         try:
             messagebox.showerror(
                 APP_TITLE,

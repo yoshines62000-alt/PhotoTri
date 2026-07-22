@@ -2,6 +2,7 @@ import struct
 import sys
 import tempfile
 import unittest
+import warnings
 import zlib
 from pathlib import Path
 
@@ -315,6 +316,36 @@ class TestColorSignature(unittest.TestCase):
         bogus.write_bytes(b"ceci n'est pas du tout une image")
         with self.assertRaises(hashing.UnreadableImageError):
             hashing.compute_color_signature_from_path(bogus)
+
+
+class TestNoDeprecatedGetdataUsage(unittest.TestCase):
+    """Verrouille I2 (audit du 2026-07-22) : Image.Image.getdata() est
+    deprecie depuis Pillow 12.2 et sera supprime en Pillow 14 (prevue
+    2027-10-15, message Pillow explicite : "Use get_flattened_data
+    instead"). compute_dhash/compute_color_signature ne doivent plus jamais
+    l'appeler - toute reapparition de getdata() dans ces fonctions ferait
+    remonter un DeprecationWarning ici, transforme en erreur par
+    simplefilter("error", ...) pour que le test echoue au lieu de se
+    contenter d'un warning silencieusement ignore."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+
+    def test_compute_dhash_raises_no_deprecation_warning(self):
+        p = self.tmp / "gradient.png"
+        _make_image(p, "gradient")
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DeprecationWarning)
+            h = hashing.compute_dhash_from_path(p)
+        self.assertIsInstance(h, int)
+
+    def test_compute_color_signature_raises_no_deprecation_warning(self):
+        p = self.tmp / "gradient.png"
+        _make_image(p, "gradient")
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DeprecationWarning)
+            sig = hashing.compute_color_signature_from_path(p)
+        self.assertEqual(len(sig), 9)
 
 
 class TestIsImageFile(unittest.TestCase):

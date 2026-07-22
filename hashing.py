@@ -84,7 +84,12 @@ def compute_dhash(image: Image.Image, hash_size: int = HASH_SIZE) -> int:
     # regression de vitesse ni de resultat par rapport a avant ce correctif).
     image.draft("RGB", target_size)
     small = image.convert("L").resize(target_size, Image.LANCZOS)
-    pixels = list(small.getdata())
+    # get_flattened_data() plutot que getdata() (bug trouve a l'audit, I2) :
+    # Image.Image.getdata() est deprecie depuis Pillow 12.2 et sera
+    # supprime en Pillow 14 (prevue 2027-10-15) - meme sequence de valeurs
+    # en sortie (verifie a l'audit), disponible dans le plancher de version
+    # deja retenu par requirements.txt (Pillow>=12.3.0).
+    pixels = list(small.get_flattened_data())
     bits = 0
     for row in range(hash_size):
         row_start = row * (hash_size + 1)
@@ -166,7 +171,9 @@ def compute_color_signature(image: Image.Image, size: int = 12) -> tuple:
     contraste), delibererement : ce n'est qu'un signal d'appoint local a
     grouping.py, jamais utilise seul."""
     small = image.convert("RGB").resize((size, size), Image.BILINEAR)
-    pixels = list(small.getdata())
+    # get_flattened_data() plutot que getdata(), deprecie - voir le
+    # commentaire equivalent dans compute_dhash ci-dessus (I2).
+    pixels = list(small.get_flattened_data())
     third = max(size // 3, 1)
     bands = []
     for band_index in range(3):

@@ -6,9 +6,11 @@ proprement (`skipTest`) si aucun affichage n'est disponible pour ouvrir une
 fenetre Tk (ex. environnement CI sans serveur graphique)."""
 
 import shutil
+import sqlite3
 import sys
 import tempfile
 import time
+import types
 import unittest
 from pathlib import Path
 from tkinter import TclError, Tk
@@ -128,6 +130,88 @@ class TestFolderLabelDoesNotHideActionButtons(unittest.TestCase):
         self.root.update_idletasks()
         self.root.update()
         self.assertEqual(app.folder_label_var.get(), short_path)
+
+
+class TestMoveButtonLabelFitsItsOwnWidth(unittest.TestCase):
+    """Verrouille F2 (audit du 2026-07-22) : ttk.Button ne redimensionne
+    jamais son texte - un widget trop etroit pour son contenu se contente
+    de le laisser deborder de son propre cadre (derniere(s) lettre(s)
+    coupees) plutot que de l'ajuster. Le bouton "Deplacer..." se
+    retrouvait ainsi compresse sous sa largeur naturelle des que l'espace
+    manquait dans la barre d'action - y compris avant meme la taille
+    minimale officiellement supportee (root.minsize(850, 550), capture
+    09_zoom_bottombar.png de l'audit). Le libelle a ete raccourci a
+    "Deplacer la selection" (le contexte "vers le dossier de revision" est
+    de toute facon deja visible juste a gauche via le champ "Dossier de
+    revision :")."""
+
+    def setUp(self):
+        try:
+            self.root = Tk()
+        except TclError as exc:
+            self.skipTest(f"Pas d'affichage disponible pour un test Tk reel : {exc}")
+        self.tmp_dir = Path(tempfile.mkdtemp())
+        self._apps = []
+
+    def tearDown(self):
+        for app in self._apps:
+            try:
+                app.db.close()
+            except Exception:
+                pass
+        try:
+            self.root.destroy()
+        except TclError:
+            pass
+
+    def _make_app(self) -> "gui.PhotoTriApp":
+        with mock.patch.object(gui, "_data_dir", return_value=self.tmp_dir), \
+             mock.patch.object(gui.update_checker, "start_update_check"):
+            app = gui.PhotoTriApp(self.root)
+        self._apps.append(app)
+        return app
+
+    def _select_a_group(self, app):
+        # Le bouton Deplacer (comme tout le panneau de detail) n'est
+        # empaquete que lorsqu'un groupe est selectionne (_on_group_select) -
+        # sans cette etape, self.detail_frame (et donc self.move_button)
+        # n'est jamais affiche, quelle que soit la taille de la fenetre.
+        p1 = self.tmp_dir / "dup1.jpg"
+        p2 = self.tmp_dir / "dup2.jpg"
+        Image.new("RGB", (32, 32), (120, 120, 120)).save(p1)
+        Image.new("RGB", (32, 32), (120, 120, 120)).save(p2)
+        app.db.upsert_photo(str(p1), 1000, 1.0, 800, 600, "sha-same", 0, None)
+        app.db.upsert_photo(str(p2), 1000, 1.0, 800, 600, "sha-same", 0, None)
+        app._refresh_groups()
+        deadline = time.monotonic() + 10
+        while app._grouping_in_progress:
+            self.root.update()
+            time.sleep(0.01)
+            self.assertLess(time.monotonic(), deadline, "le calcul de groupes ne se termine jamais")
+        iid = next(iter(app._groups_by_iid))
+        app.groups_tree.selection_set(iid)
+        app._on_group_select()
+        self.root.update_idletasks()
+        self.root.update()
+
+    def test_move_button_label_is_short(self):
+        app = self._make_app()
+        self.assertEqual(app.move_button.cget("text"), "Deplacer la selection")
+
+    def test_move_button_is_not_squeezed_below_its_natural_width(self):
+        # A la taille de fenetre par defaut de l'application (1150x720,
+        # root.geometry en __init__, jamais retrecie ici) : le bouton doit
+        # etre affiche a sa largeur naturelle complete (winfo_width ==
+        # winfo_reqwidth), jamais compresse en dessous (ce qui produirait
+        # le texte tronque decrit dans l'audit).
+        app = self._make_app()
+        self._select_a_group(app)
+        btn = app.move_button
+        self.assertEqual(btn.winfo_ismapped(), 1, "bouton Deplacer non mappe a la taille de fenetre par defaut")
+        self.assertEqual(
+            btn.winfo_width(), btn.winfo_reqwidth(),
+            "le bouton Deplacer est compresse sous sa largeur naturelle : son texte deborderait de son cadre",
+        )
 
 
 class TestConfidenceIndicatorInUI(unittest.TestCase):
@@ -401,6 +485,317 @@ class TestOrphanCopyNotLeftUnindexedOnMoveFailure(unittest.TestCase):
         shown_message = self.mock_showwarning.call_args.args[1]
         self.assertIn("Echec pour", shown_message)
         self.assertIn("echec.jpg", shown_message)
+
+
+class TestFriendlyErrorText(unittest.TestCase):
+    """Verrouille C3 (audit du 2026-07-22) : le texte brut d'une exception
+    Python/Pillow/OS (presque toujours en anglais, parfois anxiogene hors
+    contexte - ex. "decompression bomb DOS attack", codes WinError bruts)
+    ne doit plus jamais atteindre l'utilisateur tel quel dans une boite de
+    dialogue. `_friendly_error_text()` est la seule fonction chargee de
+    cette traduction ; comme c'est une fonction pure (aucun etat, aucun
+    widget), elle est testee ici directement, sans avoir besoin d'un vrai
+    `Tk()`."""
+
+    def test_decompression_bomb_maps_to_corrupted_file_message_without_anxious_wording(self):
+        exc = Image.DecompressionBombError(
+            "Image size (3600000000 pixels) exceeds limit of 178956970 "
+            "pixels, could be decompression bomb DOS attack."
+        )
+        message = gui._friendly_error_text(exc)
+        self.assertNotIn("attack", message.lower())
+        self.assertNotIn("DOS", message)
+        self.assertIn("corrompus", message.lower())
+
+    def test_unidentified_image_maps_to_corrupted_file_message(self):
+        from PIL import UnidentifiedImageError
+        message = gui._friendly_error_text(UnidentifiedImageError("cannot identify image file 'x.jpg'"))
+        self.assertIn("corrompus", message.lower())
+
+    def test_permission_error_maps_to_access_denied_message(self):
+        message = gui._friendly_error_text(PermissionError(13, "Permission denied"))
+        self.assertIn("Acces refuse", message)
+
+    def test_file_not_found_maps_to_missing_file_message(self):
+        message = gui._friendly_error_text(FileNotFoundError(2, "No such file or directory"))
+        self.assertIn("introuvable", message.lower())
+
+    def test_sqlite_locked_maps_to_database_busy_message(self):
+        message = gui._friendly_error_text(sqlite3.OperationalError("database is locked"))
+        self.assertIn("base de donnees", message.lower())
+
+    def test_disk_full_maps_to_disk_space_message(self):
+        message = gui._friendly_error_text(OSError(28, "No space left on device"))
+        self.assertIn("Espace disque insuffisant", message)
+
+    def test_generic_os_error_maps_to_disk_access_message(self):
+        message = gui._friendly_error_text(OSError(6, "The handle is invalid"))
+        self.assertIn("acces au disque", message.lower())
+
+    def test_unknown_exception_falls_back_to_generic_message(self):
+        message = gui._friendly_error_text(ValueError("un detail technique quelconque"))
+        self.assertEqual(message, "Une erreur inattendue est survenue.")
+
+    def test_no_raw_technical_numbers_leak_into_the_translated_message(self):
+        # Non-regression directe du symptome mesure a l'audit : le message
+        # traduit ne doit jamais contenir le detail technique brut de
+        # l'exception d'origine.
+        exc = Image.DecompressionBombError(
+            "Image size (3600000000 pixels) exceeds limit of 178956970 pixels"
+        )
+        message = gui._friendly_error_text(exc)
+        self.assertNotIn("3600000000", message)
+        self.assertNotIn("178956970", message)
+
+
+class TestShowFriendlyErrorDisplaysTranslatedMessageAndLogsDetail(unittest.TestCase):
+    """Complement d'integration a TestFriendlyErrorText (C3) : verrouille
+    que `_show_friendly_error()` - le point d'entree reellement appele par
+    l'ouverture de l'index, l'echec de scan et l'echec de creation du
+    dossier de revision - affiche bien le message francais generique dans
+    la boite de dialogue (jamais le texte brut de l'exception), tout en
+    conservant le detail technique complet dans erreurs.log (rien n'est
+    perdu, simplement plus impose en premiere lecture)."""
+
+    def setUp(self):
+        try:
+            self.root = Tk()
+        except TclError as exc:
+            self.skipTest(f"Pas d'affichage disponible pour un test Tk reel : {exc}")
+        self.tmp_dir = Path(tempfile.mkdtemp())
+        self._apps = []
+        self.mock_showerror = mock.patch("tkinter.messagebox.showerror").start()
+        self.addCleanup(mock.patch.stopall)
+
+    def tearDown(self):
+        for app in self._apps:
+            try:
+                app.db.close()
+            except Exception:
+                pass
+        try:
+            self.root.destroy()
+        except TclError:
+            pass
+
+    def _make_app(self) -> "gui.PhotoTriApp":
+        with mock.patch.object(gui, "_data_dir", return_value=self.tmp_dir), \
+             mock.patch.object(gui.update_checker, "start_update_check"):
+            app = gui.PhotoTriApp(self.root)
+        self._apps.append(app)
+        return app
+
+    def test_dialog_shows_french_generic_text_not_raw_exception_text(self):
+        app = self._make_app()
+        exc = Image.DecompressionBombError(
+            "Image size (3600000000 pixels) exceeds limit of 178956970 pixels, "
+            "could be decompression bomb DOS attack."
+        )
+        app._show_friendly_error("L'analyse a echoue", exc)
+
+        self.mock_showerror.assert_called_once()
+        shown_message = self.mock_showerror.call_args.args[1]
+        self.assertNotIn("attack", shown_message.lower())
+        self.assertNotIn("178956970", shown_message)
+        self.assertIn("corrompus", shown_message.lower())
+
+    def test_technical_detail_is_preserved_in_errors_log(self):
+        app = self._make_app()
+        exc = ValueError("detail technique precis attendu dans le journal")
+        app._show_friendly_error("Une operation a echoue", exc)
+
+        log_path = app.db_path.parent / "erreurs.log"
+        self.assertTrue(log_path.exists(), "le detail technique complet doit rester consultable")
+        content = log_path.read_text(encoding="utf-8")
+        self.assertIn("detail technique precis attendu dans le journal", content)
+
+        shown_message = self.mock_showerror.call_args.args[1]
+        self.assertIn(str(log_path), shown_message, "la boite de dialogue doit indiquer ou trouver le detail")
+
+
+class TestDiskSpaceCheckBeforeBatchMove(unittest.TestCase):
+    """Verrouille E5 (audit du 2026-07-22) : avant ce correctif,
+    `_move_checked_photos()` ne verifiait jamais l'espace disque disponible
+    sur le volume de destination avant de lancer une serie de
+    `shutil.move()` - un lot qui epuise l'espace disque a mi-chemin suit le
+    meme chemin de code (et le meme risque de copie partielle non indexee)
+    que E4. Le controle estime la taille des photos cochees qui necessitent
+    reellement une copie (volume de destination different de la source -
+    seul cas ou `shutil.move()` copie plutot que de renommer atomiquement)
+    et la compare a l'espace libre sur le volume de destination, avec
+    confirmation bloquante de l'utilisateur si l'estimation le depasse.
+
+    Le dossier de revision et les photos source residant reellement sur le
+    meme volume dans cet environnement de test, `Path.stat()` est
+    monkeypatche pour que le dossier de revision paraisse sur un volume
+    different (st_dev distinct) - condition necessaire pour que la taille
+    des photos soit effectivement comptabilisee plutot qu'ignoree par
+    l'optimisation "meme volume, os.rename() ne copie rien"."""
+
+    def setUp(self):
+        try:
+            self.root = Tk()
+        except TclError as exc:
+            self.skipTest(f"Pas d'affichage disponible pour un test Tk reel : {exc}")
+        self.tmp_dir = Path(tempfile.mkdtemp())
+        self.photos_dir = self.tmp_dir / "photos"
+        self.photos_dir.mkdir()
+        self.review_dir = self.tmp_dir / "revision"
+        self.review_dir.mkdir()
+        self._apps = []
+
+        self._patchers = [
+            mock.patch("tkinter.messagebox.showerror"),
+            mock.patch("tkinter.messagebox.showinfo"),
+            mock.patch("tkinter.messagebox.showwarning"),
+        ]
+        for p in self._patchers:
+            p.start()
+            self.addCleanup(p.stop)
+        self.mock_askyesno = mock.patch("tkinter.messagebox.askyesno").start()
+        self.addCleanup(mock.patch.stopall)
+
+    def tearDown(self):
+        for app in self._apps:
+            try:
+                app.db.close()
+            except Exception:
+                pass
+        try:
+            self.root.destroy()
+        except TclError:
+            pass
+
+    def _make_app(self) -> "gui.PhotoTriApp":
+        with mock.patch.object(gui, "_data_dir", return_value=self.tmp_dir / "appdata"), \
+             mock.patch.object(gui.update_checker, "start_update_check"):
+            app = gui.PhotoTriApp(self.root)
+        self._apps.append(app)
+        return app
+
+    def _index_photo(self, app, name: str):
+        path = self.photos_dir / name
+        Image.new("RGB", (16, 16), (10, 20, 30)).save(path)
+        stat = path.stat()
+        photo_id = app.db.upsert_photo(
+            str(path), stat.st_size, stat.st_mtime, 16, 16, "sha-test", 0, None,
+        )
+        return photo_id, path
+
+    def _select_one_of_two_for_move(self, app, keep_id, move_id):
+        # Un seul coche sur deux (pas la totalite du groupe) : evite de
+        # declencher le tout autre askyesno de confirmation "toutes les
+        # photos du groupe sont cochees", pour isoler celui de l'espace
+        # disque.
+        group = grouping.PhotoGroup(kind="exact", photo_ids=sorted([keep_id, move_id]), max_distance=0)
+        app._selected_group = group
+        app._checkbox_vars = {
+            keep_id: gui.BooleanVar(value=False),
+            move_id: gui.BooleanVar(value=True),
+        }
+
+    def _patch_review_dir_on_a_different_volume(self):
+        """Fait paraitre `self.review_dir` sur un volume different de celui
+        des photos source (st_dev distinct), pour que le correctif E5
+        comptabilise reellement leur taille au lieu de l'ignorer via
+        l'optimisation "meme volume" (voir le commentaire de classe)."""
+        real_stat = Path.stat
+        review_dir = self.review_dir
+
+        def fake_stat(path_obj, *args, **kwargs):
+            result = real_stat(path_obj, *args, **kwargs)
+            if path_obj == review_dir:
+                return types.SimpleNamespace(st_dev=result.st_dev + 1, st_size=result.st_size)
+            return types.SimpleNamespace(st_dev=result.st_dev, st_size=result.st_size)
+
+        patcher = mock.patch.object(Path, "stat", new=fake_stat)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_insufficient_space_asks_confirmation_and_aborts_when_declined(self):
+        app = self._make_app()
+        keep_id, _ = self._index_photo(app, "garder.jpg")
+        move_id, move_path = self._index_photo(app, "a_deplacer.jpg")
+        self._select_one_of_two_for_move(app, keep_id, move_id)
+        app.review_folder_var.set(str(self.review_dir))
+        self._patch_review_dir_on_a_different_volume()
+
+        self.mock_askyesno.return_value = False
+        with mock.patch.object(gui.shutil, "disk_usage") as mock_disk_usage, \
+             mock.patch.object(gui.shutil, "move") as mock_move:
+            mock_disk_usage.return_value = types.SimpleNamespace(total=10**9, used=10**9 - 1, free=1)
+            app._move_checked_photos()
+            mock_move.assert_not_called()
+
+        self.mock_askyesno.assert_called_once()
+        prompt = self.mock_askyesno.call_args.args[1]
+        self.assertIn("Espace disque insuffisant", prompt)
+        self.assertTrue(move_path.exists(), "rien ne doit avoir ete deplace apres un refus")
+        row = app.db.get_photo(move_id)
+        self.assertEqual(row["status"], "active")
+
+    def test_insufficient_space_proceeds_when_confirmed(self):
+        app = self._make_app()
+        keep_id, _ = self._index_photo(app, "garder2.jpg")
+        move_id, move_path = self._index_photo(app, "a_deplacer2.jpg")
+        self._select_one_of_two_for_move(app, keep_id, move_id)
+        app.review_folder_var.set(str(self.review_dir))
+        self._patch_review_dir_on_a_different_volume()
+
+        self.mock_askyesno.return_value = True
+        with mock.patch.object(gui.shutil, "disk_usage") as mock_disk_usage:
+            mock_disk_usage.return_value = types.SimpleNamespace(total=10**9, used=10**9 - 1, free=1)
+            app._move_checked_photos()
+
+        self.mock_askyesno.assert_called_once()
+        self.assertFalse(move_path.exists(), "la photo confirmee doit avoir ete deplacee")
+        dest_path = self.review_dir / "a_deplacer2.jpg"
+        self.assertTrue(dest_path.exists())
+        row = app.db.get_photo(move_id)
+        self.assertEqual(row["status"], "moved")
+
+    def test_sufficient_space_does_not_prompt(self):
+        app = self._make_app()
+        keep_id, _ = self._index_photo(app, "garder3.jpg")
+        move_id, move_path = self._index_photo(app, "a_deplacer3.jpg")
+        self._select_one_of_two_for_move(app, keep_id, move_id)
+        app.review_folder_var.set(str(self.review_dir))
+        self._patch_review_dir_on_a_different_volume()
+
+        with mock.patch.object(gui.shutil, "disk_usage") as mock_disk_usage:
+            mock_disk_usage.return_value = types.SimpleNamespace(
+                total=10**12, used=0, free=10**12,
+            )
+            app._move_checked_photos()
+
+        self.mock_askyesno.assert_not_called()
+        self.assertFalse(move_path.exists(), "le deplacement doit avoir eu lieu normalement")
+        dest_path = self.review_dir / "a_deplacer3.jpg"
+        self.assertTrue(dest_path.exists())
+
+    def test_same_volume_move_is_never_blocked_by_the_disk_space_check(self):
+        # Cas le plus courant en usage reel (dossier de revision place par
+        # defaut a cote du dossier scanne, meme volume que lui) :
+        # shutil.move() emprunte alors os.rename(), qui ne copie rien - le
+        # correctif E5 ne doit donc jamais bloquer ce cas, meme si
+        # shutil.disk_usage() rapporte tres peu d'espace libre.
+        app = self._make_app()
+        keep_id, _ = self._index_photo(app, "garder4.jpg")
+        move_id, move_path = self._index_photo(app, "a_deplacer4.jpg")
+        self._select_one_of_two_for_move(app, keep_id, move_id)
+        app.review_folder_var.set(str(self.review_dir))
+        # Volontairement PAS de _patch_review_dir_on_a_different_volume ici :
+        # dans cet environnement de test, review_dir et photos_dir sont
+        # bien sur le meme volume reel.
+
+        with mock.patch.object(gui.shutil, "disk_usage") as mock_disk_usage:
+            mock_disk_usage.return_value = types.SimpleNamespace(total=10**9, used=10**9 - 1, free=1)
+            app._move_checked_photos()
+
+        self.mock_askyesno.assert_not_called()
+        self.assertFalse(move_path.exists())
+        dest_path = self.review_dir / "a_deplacer4.jpg"
+        self.assertTrue(dest_path.exists())
 
 
 if __name__ == "__main__":
