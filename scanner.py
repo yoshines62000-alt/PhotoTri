@@ -123,68 +123,87 @@ def scan_folder(
     seen_paths = set()
     stopped_early = False
 
-    for index, path in enumerate(files, start=1):
-        if should_stop is not None and should_stop():
-            stopped_early = True
-            break
-        path_str = str(path)
-        seen_paths.add(path_str)
-        try:
-            stat = path.stat()
-        except OSError as exc:
-            result.errors.append((path_str, str(exc)))
+    # La boucle de scan elle-meme est enveloppee dans un try/finally dont le
+    # seul role est de garantir le commit du lot en cours avant qu'une
+    # exception ne se propage hors de scan_folder - bug trouve a l'audit
+    # (C4) : les erreurs de decodage d'image sont deja rattrapees ci-dessous
+    # (cf. commentaire plus bas), mais une authentique erreur disque/SQLite
+    # (ex. disque plein pendant un upsert ou un commit intermediaire, cf.
+    # C5) n'etait, elle, interceptee nulle part dans cette fonction : elle
+    # remontait directement jusqu'au commit final inconditionnel (ligne
+    # `db.commit()` juste apres la boucle), qui n'etait donc jamais atteint.
+    # Jusqu'a _COMMIT_BATCH_SIZE photos deja hachees et upsertees dans la
+    # transaction SQLite en cours restaient alors non validees et etaient
+    # perdues a la fermeture de la connexion, en plus de l'erreur elle-meme.
+    # Le `finally` ci-dessous s'execute quelle que soit l'issue de la boucle
+    # (fin normale, `break` sur arret demande, ou exception qui continue de
+    # se propager ensuite) et valide systematiquement ce qui a deja ete
+    # ecrit, sans jamais avaler l'exception d'origine.
+    try:
+        for index, path in enumerate(files, start=1):
+            if should_stop is not None and should_stop():
+                stopped_early = True
+                break
+            path_str = str(path)
+            seen_paths.add(path_str)
+            try:
+                stat = path.stat()
+            except OSError as exc:
+                result.errors.append((path_str, str(exc)))
+                if progress_callback:
+                    progress_callback(index, result.total_found, path_str)
+                continue
+
+            existing = db.get_photo_by_path(path_str)
+            if existing is not None and existing["size"] == stat.st_size and existing["mtime"] == stat.st_mtime:
+                result.skipped_unchanged += 1
+                if progress_callback:
+                    progress_callback(index, result.total_found, path_str)
+                continue
+
+            try:
+                sha = hashing.file_sha256(path)
+                with Image.open(path, formats=hashing.ALLOWED_PILLOW_FORMATS) as img:
+                    width, height = img.size
+                    taken_at = _extract_taken_at(img)
+                    phash = hashing.compute_dhash(img)
+            except Exception as exc:
+                # Capture volontairement large (pas seulement
+                # UnreadableImageError/OSError/ValueError) : Pillow peut lever,
+                # selon le format et le type de corruption, des exceptions qui
+                # n'heritent d'aucune de ces classes - notamment
+                # PIL.Image.DecompressionBombError (en-tete corrompu ou piege
+                # revendiquant des dimensions demesurees), qui herite directement
+                # d'Exception. Avant ce correctif, un seul fichier dans cet etat
+                # faisait avorter tout le scan sans rien committer du lot en
+                # cours (bug trouve a l'audit) au lieu d'etre traite comme les
+                # autres fichiers illisibles ci-dessus (errors, compteur inclus).
+                result.errors.append((path_str, f"{type(exc).__name__}: {exc}"))
+                if progress_callback:
+                    progress_callback(index, result.total_found, path_str)
+                continue
+
+            # commit=False : le fsync disque est differe et groupe (voir le
+            # commit periodique juste en dessous) plutot que paye a chaque
+            # photo - mesure a l'audit, ce commit par ligne dominait le temps
+            # d'un gros scan. Un commit final inconditionnel apres la boucle
+            # (et un commit ici tous les _COMMIT_BATCH_SIZE upserts) garantit
+            # qu'un arret/crash en cours de scan ne perd jamais plus qu'un lot
+            # deja traite, jamais tout le travail depuis le debut du scan.
+            db.upsert_photo(path_str, stat.st_size, stat.st_mtime, width, height, sha, phash, taken_at, commit=False)
+            result.scanned += 1
+            if result.scanned % _COMMIT_BATCH_SIZE == 0:
+                db.commit()
             if progress_callback:
                 progress_callback(index, result.total_found, path_str)
-            continue
-
-        existing = db.get_photo_by_path(path_str)
-        if existing is not None and existing["size"] == stat.st_size and existing["mtime"] == stat.st_mtime:
-            result.skipped_unchanged += 1
-            if progress_callback:
-                progress_callback(index, result.total_found, path_str)
-            continue
-
-        try:
-            sha = hashing.file_sha256(path)
-            with Image.open(path, formats=hashing.ALLOWED_PILLOW_FORMATS) as img:
-                width, height = img.size
-                taken_at = _extract_taken_at(img)
-                phash = hashing.compute_dhash(img)
-        except Exception as exc:
-            # Capture volontairement large (pas seulement
-            # UnreadableImageError/OSError/ValueError) : Pillow peut lever,
-            # selon le format et le type de corruption, des exceptions qui
-            # n'heritent d'aucune de ces classes - notamment
-            # PIL.Image.DecompressionBombError (en-tete corrompu ou piege
-            # revendiquant des dimensions demesurees), qui herite directement
-            # d'Exception. Avant ce correctif, un seul fichier dans cet etat
-            # faisait avorter tout le scan sans rien committer du lot en
-            # cours (bug trouve a l'audit) au lieu d'etre traite comme les
-            # autres fichiers illisibles ci-dessus (errors, compteur inclus).
-            result.errors.append((path_str, f"{type(exc).__name__}: {exc}"))
-            if progress_callback:
-                progress_callback(index, result.total_found, path_str)
-            continue
-
-        # commit=False : le fsync disque est differe et groupe (voir le
-        # commit periodique juste en dessous) plutot que paye a chaque
-        # photo - mesure a l'audit, ce commit par ligne dominait le temps
-        # d'un gros scan. Un commit final inconditionnel apres la boucle
-        # (et un commit ici tous les _COMMIT_BATCH_SIZE upserts) garantit
-        # qu'un arret/crash en cours de scan ne perd jamais plus qu'un lot
-        # deja traite, jamais tout le travail depuis le debut du scan.
-        db.upsert_photo(path_str, stat.st_size, stat.st_mtime, width, height, sha, phash, taken_at, commit=False)
-        result.scanned += 1
-        if result.scanned % _COMMIT_BATCH_SIZE == 0:
-            db.commit()
-        if progress_callback:
-            progress_callback(index, result.total_found, path_str)
-
-    # Valide tout travail restant depuis le dernier commit groupe (moins de
-    # _COMMIT_BATCH_SIZE photos depuis lors) - sans ce commit final, ces
-    # dernieres photos scannees resteraient dans une transaction jamais
-    # validee et seraient perdues si le processus se terminait juste apres.
-    db.commit()
+    finally:
+        # Valide tout travail restant depuis le dernier commit groupe (moins
+        # de _COMMIT_BATCH_SIZE photos depuis lors) - sans ce commit, ces
+        # dernieres photos scannees resteraient dans une transaction jamais
+        # validee et seraient perdues, que la boucle se soit terminee
+        # normalement, ait ete interrompue via `should_stop`, ou qu'une
+        # exception soit en train de se propager.
+        db.commit()
 
     # Un scan interrompu (bouton "Arreter", fermeture de la fenetre) n'a vu
     # qu'une partie des fichiers reellement presents sur le disque - purger

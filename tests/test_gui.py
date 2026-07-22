@@ -5,6 +5,7 @@ dans l'audit du 2026-07-22), invisibles a la seule lecture du code. Ignores
 proprement (`skipTest`) si aucun affichage n'est disponible pour ouvrir une
 fenetre Tk (ex. environnement CI sans serveur graphique)."""
 
+import shutil
 import sys
 import tempfile
 import time
@@ -266,6 +267,140 @@ class TestConfidenceIndicatorInUI(unittest.TestCase):
         joined = "\n".join(card_texts)
         self.assertIn("Copie exacte", joined)
         self.assertNotIn("Distance :", joined)
+
+
+class TestOrphanCopyNotLeftUnindexedOnMoveFailure(unittest.TestCase):
+    """Verrouille E4 (audit du 2026-07-22) : quand shutil.move() bascule sur
+    son chemin copie+suppression (volumes differents) et que SEULE la
+    suppression de la source echoue (fichier source en lecture seule /
+    permissions restreintes), une copie complete existe deja dans le
+    dossier de revision au moment ou l'exception est levee.
+    _move_checked_photos() ne doit alors ni pretendre a l'utilisateur
+    qu'"aucune action n'a eu lieu" (l'ancien message "Echec pour : ..."),
+    ni laisser cette copie orpheline hors de l'index (jamais reperee par un
+    scan futur, le dossier de revision etant exclu du parcours). A
+    l'inverse, un veritable echec de copie (source intacte, destination
+    absente/incomplete) doit rester rapporte comme un echec et ne doit
+    laisser aucun fichier partiel trainer dans le dossier de revision."""
+
+    def setUp(self):
+        try:
+            self.root = Tk()
+        except TclError as exc:
+            self.skipTest(f"Pas d'affichage disponible pour un test Tk reel : {exc}")
+        self.tmp_dir = Path(tempfile.mkdtemp())
+        self.photos_dir = self.tmp_dir / "photos"
+        self.photos_dir.mkdir()
+        self.review_dir = self.tmp_dir / "revision"
+        self._apps = []
+
+        # showerror/showinfo neutralises (vraies boites modales) ;
+        # showwarning capture pour inspecter le message reellement montre a
+        # l'utilisateur, sans jamais toucher aux widgets/logique metier.
+        self._patchers = [
+            mock.patch("tkinter.messagebox.showerror"),
+            mock.patch("tkinter.messagebox.showinfo"),
+        ]
+        for p in self._patchers:
+            p.start()
+            self.addCleanup(p.stop)
+        self.mock_showwarning = mock.patch("tkinter.messagebox.showwarning").start()
+        self.addCleanup(mock.patch.stopall)
+
+    def tearDown(self):
+        for app in self._apps:
+            try:
+                app.db.close()
+            except Exception:
+                pass
+        try:
+            self.root.destroy()
+        except TclError:
+            pass
+
+    def _make_app(self) -> "gui.PhotoTriApp":
+        with mock.patch.object(gui, "_data_dir", return_value=self.tmp_dir / "appdata"), \
+             mock.patch.object(gui.update_checker, "start_update_check"):
+            app = gui.PhotoTriApp(self.root)
+        self._apps.append(app)
+        return app
+
+    def _index_photo(self, app, name: str):
+        path = self.photos_dir / name
+        Image.new("RGB", (16, 16), (10, 20, 30)).save(path)
+        stat = path.stat()
+        photo_id = app.db.upsert_photo(
+            str(path), stat.st_size, stat.st_mtime, 16, 16, "sha-test", 0, None,
+        )
+        return photo_id, path
+
+    def _select_group_for_move(self, app, keep_id, move_id):
+        group = grouping.PhotoGroup(kind="exact", photo_ids=sorted([keep_id, move_id]), max_distance=0)
+        app._selected_group = group
+        app._checkbox_vars = {
+            keep_id: gui.BooleanVar(value=False),
+            move_id: gui.BooleanVar(value=True),
+        }
+
+    def test_delete_failure_after_successful_copy_is_indexed_not_reported_as_pure_failure(self):
+        app = self._make_app()
+        keep_id, _ = self._index_photo(app, "garder.jpg")
+        move_id, move_path = self._index_photo(app, "a_deplacer.jpg")
+        self._select_group_for_move(app, keep_id, move_id)
+        app.review_folder_var.set(str(self.review_dir))
+
+        def fake_move(src, dst):
+            # Reproduit le chemin copy+unlink emprunte par shutil.move()
+            # entre deux volumes differents, avec seule la suppression
+            # finale de la source qui echoue (permissions/lecture seule) -
+            # une copie complete existe deja quand l'exception remonte.
+            shutil.copy2(src, dst)
+            raise OSError(5, "Acces refuse")
+
+        with mock.patch.object(gui.shutil, "move", side_effect=fake_move):
+            app._move_checked_photos()
+
+        dest_path = self.review_dir / "a_deplacer.jpg"
+        self.assertTrue(dest_path.exists(), "la copie complete doit rester dans le dossier de revision")
+        self.assertTrue(move_path.exists(), "la source n'a pas pu etre supprimee (simule) - toujours presente")
+
+        row = app.db.get_photo(move_id)
+        self.assertEqual(row["status"], "moved", "le fichier est bel et bien range : l'index doit le refleter")
+        self.assertEqual(row["moved_to"], str(dest_path))
+
+        self.mock_showwarning.assert_called_once()
+        shown_message = self.mock_showwarning.call_args.args[1]
+        self.assertNotIn("Echec pour", shown_message, "ne doit pas etre presente comme un pur echec")
+        self.assertIn("original n'a PAS pu etre", shown_message)
+        self.assertIn("a_deplacer.jpg", shown_message)
+
+    def test_genuine_copy_failure_leaves_no_orphan_file_and_is_reported_as_failure(self):
+        app = self._make_app()
+        keep_id, _ = self._index_photo(app, "garder2.jpg")
+        move_id, move_path = self._index_photo(app, "echec.jpg")
+        self._select_group_for_move(app, keep_id, move_id)
+        app.review_folder_var.set(str(self.review_dir))
+
+        def fake_move(src, dst):
+            # Veritable echec de copie (ex. disque plein en cours
+            # d'ecriture) : la source reste intacte, aucune copie complete
+            # n'existe.
+            raise OSError(28, "Espace disque insuffisant")
+
+        with mock.patch.object(gui.shutil, "move", side_effect=fake_move):
+            app._move_checked_photos()
+
+        dest_path = self.review_dir / "echec.jpg"
+        self.assertFalse(dest_path.exists(), "aucune copie partielle ne doit rester orpheline")
+        self.assertTrue(move_path.exists())
+
+        row = app.db.get_photo(move_id)
+        self.assertEqual(row["status"], "active", "un veritable echec ne doit pas marquer la photo comme deplacee")
+
+        self.mock_showwarning.assert_called_once()
+        shown_message = self.mock_showwarning.call_args.args[1]
+        self.assertIn("Echec pour", shown_message)
+        self.assertIn("echec.jpg", shown_message)
 
 
 if __name__ == "__main__":

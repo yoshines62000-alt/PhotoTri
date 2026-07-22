@@ -785,7 +785,7 @@ class PhotoTriApp:
             messagebox.showerror(APP_TITLE, f"Impossible de creer le dossier de revision :\n{exc}")
             return
 
-        moved, failed, already_gone = 0, [], 0
+        moved, failed, already_gone, orphan_copies = 0, [], 0, []
         for photo_id in checked_ids:
             row = self.db.get_photo(photo_id)
             if row is None:
@@ -799,6 +799,56 @@ class PhotoTriApp:
             try:
                 shutil.move(str(source), str(dest))
             except OSError as exc:
+                # Entre volumes differents, shutil.move ne peut pas se
+                # contenter d'un os.rename() atomique : il copie d'abord le
+                # fichier vers `dest` puis supprime la source. Si SEULE
+                # cette suppression finale echoue (source en lecture
+                # seule/permissions restreintes - assez courant avec des
+                # outils de synchronisation cloud ou des cartes SD
+                # protegees), une copie complete et valide existe deja dans
+                # le dossier de revision au moment ou cette exception est
+                # levee. Avant ce correctif, ce cas etait toujours rapporte
+                # comme un pur "Echec" - message trompeur, puisqu'une copie
+                # orpheline restait en realite sur le disque, jamais
+                # indexee (db.mark_moved jamais appele) et donc invisible a
+                # tout scan futur (le dossier de revision est exclu du
+                # scan) - bug trouve a l'audit (E4).
+                #
+                # On distingue ce cas (copie complete, seule la suppression
+                # a echoue) d'un veritable echec de copie (source toujours
+                # intacte car c'est precisement elle qui n'a pas pu etre
+                # supprimee) en comparant la taille du fichier copie a
+                # celle de la source.
+                try:
+                    copy_is_complete = (
+                        source.exists() and dest.exists()
+                        and dest.stat().st_size == source.stat().st_size
+                    )
+                except OSError:
+                    copy_is_complete = False
+
+                if copy_is_complete:
+                    # Le fichier physique est bel et bien range dans le
+                    # dossier de revision : on le traite comme deplace pour
+                    # rester coherent avec la realite du disque (index a
+                    # jour, plus jamais reproposee comme active), et on
+                    # avertit separement que l'original n'a pas pu etre
+                    # supprime plutot que de pretendre qu'aucune action n'a
+                    # eu lieu.
+                    self.db.mark_moved(photo_id, str(dest))
+                    moved += 1
+                    orphan_copies.append((source.name, str(exc)))
+                    continue
+
+                # Echec de copie proprement dit (pas seulement de la
+                # suppression) : on ne laisse pas trainer une copie
+                # partielle/corrompue non indexee dans le dossier de
+                # revision plutot que de revenir a un etat coherent.
+                if dest.exists():
+                    try:
+                        dest.unlink()
+                    except OSError:
+                        pass
                 failed.append((source.name, str(exc)))
                 continue
             self.db.mark_moved(photo_id, str(dest))
@@ -807,8 +857,15 @@ class PhotoTriApp:
         message = f"{moved} photo(s) deplacee(s) vers :\n{review_dir}"
         if already_gone:
             message += f"\n\n{already_gone} photo(s) etaient deja disparues de l'index (ignoree(s))."
+        if orphan_copies:
+            message += (
+                "\n\nCopiees dans le dossier de revision, mais l'original n'a PAS pu etre "
+                "supprime (verifiez les droits d'acces sur la source) :\n"
+                + "\n".join(f"- {name} ({err})" for name, err in orphan_copies)
+            )
         if failed:
             message += "\n\nEchec pour :\n" + "\n".join(f"- {name} ({err})" for name, err in failed)
+        if failed or orphan_copies:
             messagebox.showwarning(APP_TITLE, message)
         else:
             messagebox.showinfo(APP_TITLE, message)

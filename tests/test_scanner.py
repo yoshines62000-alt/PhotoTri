@@ -1,3 +1,4 @@
+import sqlite3
 import struct
 import sys
 import tempfile
@@ -262,6 +263,43 @@ class TestScanFolder(unittest.TestCase):
         # commit final inconditionnel pour la 3e restante - 2 commits au
         # total, jamais 3 (un par photo, l'ancien comportement).
         self.assertEqual(commit_calls["count"], 2)
+
+    def test_unhandled_exception_mid_scan_does_not_lose_pending_uncommitted_batch(self):
+        # Verrouille C4 : une authentique erreur disque/SQLite (pas une
+        # erreur d'image, deja geree separement, cf. les tests ci-dessus sur
+        # les fichiers illisibles) survenant PENDANT la boucle - ici
+        # simulee en faisant lever db.upsert_photo lui-meme - ne doit pas
+        # faire perdre les photos deja upsertees avec commit=False depuis le
+        # dernier commit groupe. Avant le correctif, le seul `db.commit()`
+        # inconditionnel se trouvait APRES la boucle et n'etait donc jamais
+        # atteint quand une exception se propageait depuis l'interieur de la
+        # boucle : le lot en cours de commit groupe (jusqu'a
+        # _COMMIT_BATCH_SIZE photos) restait dans une transaction jamais
+        # validee et disparaissait a la fermeture de la connexion.
+        _make_photo(self.photos_dir / "a.jpg")
+        _make_photo(self.photos_dir / "b.jpg")
+        _make_photo(self.photos_dir / "c.jpg")
+
+        original_upsert = self.db.upsert_photo
+        calls = {"count": 0}
+
+        def failing_on_third_call(*args, **kwargs):
+            calls["count"] += 1
+            if calls["count"] == 3:
+                raise sqlite3.OperationalError("disk I/O error")
+            return original_upsert(*args, **kwargs)
+
+        # _COMMIT_BATCH_SIZE reste a sa valeur par defaut (200) ici : la
+        # 3e photo tombe donc AVANT tout commit groupe intermediaire, ce qui
+        # isole precisement le cas non couvert par le commit final normal.
+        with unittest.mock.patch.object(self.db, "upsert_photo", side_effect=failing_on_third_call):
+            with self.assertRaises(sqlite3.OperationalError):
+                scanner.scan_folder(self.photos_dir, self.db)
+
+        self.assertEqual(
+            self.db.count_photos(), 2,
+            "les 2 upserts reussis avant l'exception doivent rester commites, pas perdus",
+        )
 
     # -- exclusion du dossier de revision (bug trouve a l'audit) -------------------
 
