@@ -49,13 +49,23 @@ class Database:
         path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(str(path))
         self.conn.row_factory = sqlite3.Row
-        # WAL : les lecteurs (ex: l'UI qui affiche des groupes) ne bloquent
-        # plus l'ecrivain (le thread de scan) et reciproquement. busy_timeout
-        # generereux en complement (au lieu de se fier au seul defaut de
-        # sqlite3.connect) : defense en profondeur si jamais un futur chemin
-        # de code venait a ouvrir deux connexions actives en meme temps.
-        self.conn.execute("PRAGMA journal_mode=WAL")
+        # busy_timeout POSE EN PREMIER, avant journal_mode=WAL : si une autre
+        # connexion tient deja un verrou sur le fichier au moment de
+        # l'ouverture (ex. deux instances de PhotoTri.exe lancees a
+        # quelques millisecondes d'ecart par un double-clic), c'est la mise
+        # en place du mode WAL elle-meme qui a besoin d'attendre ce verrou -
+        # pose apres, busy_timeout arrive trop tard pour la proteger et
+        # PRAGMA journal_mode=WAL peut lever "database is locked" (course
+        # reproduite a l'audit). Une fois busy_timeout actif, la connexion
+        # attend jusqu'a 10s au lieu d'echouer immediatement, y compris pour
+        # ce tout premier PRAGMA. WAL : les lecteurs (ex: l'UI qui affiche
+        # des groupes) ne bloquent plus l'ecrivain (le thread de scan) et
+        # reciproquement. busy_timeout genereux en complement (au lieu de se
+        # fier au seul defaut de sqlite3.connect) : defense en profondeur
+        # si jamais un futur chemin de code venait a ouvrir deux connexions
+        # actives en meme temps.
         self.conn.execute("PRAGMA busy_timeout=10000")
+        self.conn.execute("PRAGMA journal_mode=WAL")
         self._create_schema()
 
     def close(self) -> None:

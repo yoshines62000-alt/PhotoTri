@@ -29,10 +29,12 @@ from tkinter import (
     BOTH, END, HORIZONTAL, LEFT, RIGHT, TOP, X, Y, VERTICAL,
     BooleanVar, Canvas, IntVar, StringVar, Tk, Toplevel, ttk, filedialog, messagebox,
 )
+from tkinter import font as tkfont
 
 from PIL import Image, ImageTk
 
 import grouping
+import hashing
 import scanner
 import update_checker
 from db import Database
@@ -62,6 +64,44 @@ def _format_size(num_bytes: int) -> str:
             return f"{size:.0f} {unit}" if unit == "o" else f"{size:.1f} {unit}"
         size /= 1024
     return f"{size:.1f} Go"
+
+
+class _Tooltip:
+    """Info-bulle minimale (Tkinter n'en fournit pas nativement) : affiche
+    `text_getter()` dans une petite fenetre sans decoration au survol de
+    `widget`, la referme au depart de la souris. Utilisee pour garder le
+    chemin de dossier complet consultable meme quand son affichage est
+    tronque (voir _update_folder_label)."""
+
+    def __init__(self, widget, text_getter):
+        self._widget = widget
+        self._text_getter = text_getter
+        self._tipwindow: Optional[Toplevel] = None
+        widget.bind("<Enter>", self._show)
+        widget.bind("<Leave>", self._hide)
+
+    def _show(self, event=None):
+        text = self._text_getter()
+        if not text or self._tipwindow is not None:
+            return
+        x = self._widget.winfo_rootx() + 4
+        y = self._widget.winfo_rooty() + self._widget.winfo_height() + 4
+        self._tipwindow = tw = Toplevel(self._widget)
+        tw.wm_overrideredirect(True)
+        tw.wm_geometry(f"+{x}+{y}")
+        try:
+            tw.attributes("-topmost", True)
+        except Exception:
+            pass
+        ttk.Label(
+            tw, text=text, foreground="black", font=BODY_FONT,
+            background="#ffffe0", relief="solid", borderwidth=1, padding=(4, 2),
+        ).pack()
+
+    def _hide(self, event=None):
+        if self._tipwindow is not None:
+            self._tipwindow.destroy()
+            self._tipwindow = None
 
 
 def _unique_destination(dest_dir: Path, filename: str) -> Path:
@@ -132,14 +172,25 @@ class PhotoTriApp:
     def _build_layout(self):
         top = ttk.Frame(self.root)
         top.pack(fill=X, padx=10, pady=10)
+        self.top_frame = top
 
         self.choose_folder_button = ttk.Button(top, text="Choisir un dossier a analyser...", command=self._choose_folder)
         self.choose_folder_button.pack(side=LEFT)
-        self.folder_label_var = StringVar(value="Aucun dossier choisi")
-        ttk.Label(top, textvariable=self.folder_label_var, foreground="black", font=BODY_FONT).pack(side=LEFT, padx=10)
+        self._folder_full_path = "Aucun dossier choisi"
+        self.folder_label_var = StringVar(value=self._folder_full_path)
+        # Pas de largeur/wraplength fixe ici : la largeur affichee est
+        # recalculee dynamiquement (_update_folder_label) en fonction de
+        # l'espace reellement disponible, pour ne jamais repousser les
+        # controles de droite (Analyser/Arreter) hors champ - voir
+        # _folder_label_available_width.
+        self.folder_label = ttk.Label(top, textvariable=self.folder_label_var, foreground="black", font=BODY_FONT)
+        self.folder_label.pack(side=LEFT, padx=10)
+        self._folder_font = tkfont.Font(font=BODY_FONT)
+        self._folder_tooltip = _Tooltip(self.folder_label, lambda: self._folder_full_path)
 
         right_controls = ttk.Frame(top)
         right_controls.pack(side=RIGHT)
+        self.right_controls_frame = right_controls
         ttk.Label(right_controls, text="Sensibilite quasi-doublons :", foreground="black", font=BODY_FONT).pack(side=LEFT)
         # validate="key" + validatecommand bloque toute saisie non numerique a
         # la racine - bug trouve a l'audit : IntVar.get() levait TclError sur
@@ -157,6 +208,20 @@ class PhotoTriApp:
         self.scan_button.pack(side=LEFT)
         self.stop_button = ttk.Button(right_controls, text="Arreter", command=self._request_stop, state="disabled")
         self.stop_button.pack(side=LEFT, padx=(6, 0))
+
+        # <Configure> de `top` capture les redimensionnements reels de la
+        # fenetre (fill=X propage la largeur de root a top) ; recalculer la
+        # troncature du chemin affiche a chaque fois garantit que les
+        # boutons Analyser/Arreter restent toujours visibles, meme sur un
+        # chemin de dossier long (bug trouve a l'audit : sans cette borne,
+        # un chemin OneDrive realiste de 144 caracteres poussait ces deux
+        # boutons entierement hors champ - ismapped=0, non cliquables - a
+        # la taille de fenetre par defaut). Lie ici, une fois tous les
+        # widgets de `top` construits, pour que le premier <Configure>
+        # (declenche au tout premier affichage de la fenetre) trouve deja
+        # right_controls_frame pret.
+        top.bind("<Configure>", lambda event: self._update_folder_label())
+        self._update_folder_label()
 
         progress_frame = ttk.Frame(self.root)
         progress_frame.pack(fill=X, padx=10)
@@ -256,7 +321,8 @@ class PhotoTriApp:
         if not chosen:
             return
         self.selected_folder = Path(chosen)
-        self.folder_label_var.set(str(self.selected_folder))
+        self._folder_full_path = str(self.selected_folder)
+        self._update_folder_label()
         self.scan_button.configure(state="normal")
         if not self.review_folder_var.get():
             # A cote du dossier scanne, PAS dedans - bug trouve a l'audit :
@@ -273,6 +339,61 @@ class PhotoTriApp:
         chosen = filedialog.askdirectory(title="Choisir le dossier de revision (destination des doublons deplaces)")
         if chosen:
             self.review_folder_var.set(chosen)
+
+    # -- affichage du chemin de dossier (largeur bornee) ----------------------------
+
+    def _folder_label_available_width(self) -> int:
+        """Largeur en pixels que le libellé du dossier peut occuper sans
+        repousser `right_controls_frame` (Sensibilite/Recalculer/Analyser/
+        Arreter) hors de la fenetre. Base sur la largeur REELLEMENT allouee
+        a `top` (bornee par la fenetre, meme si les enfants demanderaient
+        plus - c'est precisement l'absence de cette borne qui causait le
+        bug : un Label sans largeur maximale peut demander une largeur
+        illimitee, forçant right_controls_frame a etre packe hors champ).
+        Marge genereuse (60px) pour absorber les paddings/bordures internes
+        non capturees par winfo_reqwidth()."""
+        self.top_frame.update_idletasks()
+        total_width = self.top_frame.winfo_width()
+        if total_width <= 1:
+            # Fenetre pas encore mappee (tout premier appel avant affichage) :
+            # se rabattre sur la largeur de la fenetre elle-meme.
+            total_width = self.root.winfo_width() or 1150
+        reserved = self.choose_folder_button.winfo_reqwidth() + self.right_controls_frame.winfo_reqwidth()
+        margin = 60
+        return max(total_width - reserved - margin, 40)
+
+    def _truncate_text_to_pixel_width(self, text: str, max_width: int) -> str:
+        """Tronque `text` (en gardant la FIN de la chaine - c'est la partie
+        la plus informative d'un chemin, ex. le nom du sous-dossier final)
+        pour que sa largeur rendue avec self._folder_font ne depasse pas
+        `max_width` pixels, en prefixant par "..." si tronque. Mesure reelle
+        via Font.measure plutot qu'un simple compte de caracteres : robuste
+        aux polices a chasse variable et aux parametres d'echelle Windows."""
+        if self._folder_font.measure(text) <= max_width:
+            return text
+        ellipsis = "..."
+        if self._folder_font.measure(ellipsis) >= max_width:
+            return ellipsis
+        lo, hi, best = 0, len(text), ""
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            candidate = text[-mid:] if mid > 0 else ""
+            if self._folder_font.measure(ellipsis + candidate) <= max_width:
+                best = candidate
+                lo = mid + 1
+            else:
+                hi = mid - 1
+        return ellipsis + best
+
+    def _update_folder_label(self) -> None:
+        """Recalcule le texte affiche pour le chemin de dossier choisi en
+        fonction de l'espace reellement disponible - voir
+        _folder_label_available_width. Le chemin complet reste toujours
+        consultable via l'info-bulle (_folder_tooltip) au survol."""
+        available = self._folder_label_available_width()
+        truncated = self._truncate_text_to_pixel_width(self._folder_full_path, available)
+        if truncated != self.folder_label_var.get():
+            self.folder_label_var.set(truncated)
 
     # -- scan (thread separe) ------------------------------------------------------
 
@@ -533,7 +654,7 @@ class PhotoTriApp:
         thumb_label = ttk.Label(card)
         thumb_label.pack()
         try:
-            with Image.open(photo["path"]) as img:
+            with Image.open(photo["path"], formats=hashing.ALLOWED_PILLOW_FORMATS) as img:
                 # draft() accelere nettement le decodage JPEG quand on ne
                 # veut qu'une vignette (no-op silencieux sur les formats non
                 # JPEG) - optimisation trouvee a l'audit, le decodage pleine

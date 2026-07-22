@@ -15,7 +15,7 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
-from PIL import Image, UnidentifiedImageError
+from PIL import Image
 import pillow_heif
 
 # Enregistre l'ouvreur HEIF/HEIC de Pillow des l'import de ce module (qui est
@@ -29,6 +29,22 @@ pillow_heif.register_heif_opener()
 HASH_SIZE = 8  # -> hash de HASH_SIZE * HASH_SIZE bits (64 bits par defaut)
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".tiff", ".tif", ".webp", ".heic", ".heif"}
+
+# Le filtrage par extension (is_image_file, ci-dessous) n'est PAS une
+# barriere de securite : Pillow determine le format reel d'un fichier par
+# son contenu ("magic bytes"), pas par son nom - un fichier nomme ".jpg" dont
+# le contenu reel est un PSD/FITS/ICO/etc. serait decode par Pillow avec le
+# decodeur correspondant a son VRAI format, quelle que soit son extension
+# (verifie a l'audit). Passer `formats=ALLOWED_PILLOW_FORMATS` a
+# Image.open() restreint explicitement les decodeurs effectivement utilises
+# a ceux correspondant aux extensions annoncees par IMAGE_EXTENSIONS : toute
+# tentative d'ouverture d'un fichier deguise dont le contenu reel est un
+# format hors de cette liste echoue proprement avec UnidentifiedImageError
+# (deja geree comme "image illisible, ignoree") au lieu d'etre decodee par
+# un decodeur Pillow potentiellement plus expose. Ceinture-et-bretelles en
+# complement du plancher de version Pillow (requirements.txt), pas un
+# remplacement.
+ALLOWED_PILLOW_FORMATS = ("JPEG", "PNG", "BMP", "GIF", "TIFF", "WEBP", "HEIF")
 
 
 class UnreadableImageError(Exception):
@@ -83,12 +99,22 @@ def compute_dhash_from_path(path: Path, hash_size: int = HASH_SIZE) -> int:
     """Ouvre et hache un fichier image depuis le disque. Leve
     UnreadableImageError (plutot que de laisser fuiter l'exception Pillow
     brute) pour que scanner.py puisse distinguer "image illisible, a
-    ignorer et signaler" d'une vraie erreur de programmation."""
+    ignorer et signaler" d'une vraie erreur de programmation.
+
+    La capture est deliberement large (`Exception`, pas seulement
+    `UnidentifiedImageError`/`OSError`/`ValueError`) : Pillow leve, selon le
+    format et le type de corruption, des exceptions qui n'heritent d'aucune
+    de ces trois classes - notamment `PIL.Image.DecompressionBombError`
+    (herite directement d'`Exception`), declenchee par un en-tete corrompu
+    ou piege revendiquant des dimensions demesurees. Avant ce correctif, une
+    telle exception remontait brute et faisait avorter tout le scan pour un
+    seul fichier (bug trouve a l'audit) au lieu d'etre traitee comme les
+    autres fichiers illisibles."""
     try:
-        with Image.open(path) as img:
+        with Image.open(path, formats=ALLOWED_PILLOW_FORMATS) as img:
             return compute_dhash(img, hash_size=hash_size)
-    except (UnidentifiedImageError, OSError, ValueError) as exc:
-        raise UnreadableImageError(f"Image illisible : {path}") from exc
+    except Exception as exc:
+        raise UnreadableImageError(f"Image illisible : {path} ({type(exc).__name__}: {exc})") from exc
 
 
 def hamming_distance(a: int, b: int) -> int:

@@ -146,12 +146,22 @@ def scan_folder(
 
         try:
             sha = hashing.file_sha256(path)
-            with Image.open(path) as img:
+            with Image.open(path, formats=hashing.ALLOWED_PILLOW_FORMATS) as img:
                 width, height = img.size
                 taken_at = _extract_taken_at(img)
                 phash = hashing.compute_dhash(img)
-        except (hashing.UnreadableImageError, OSError, ValueError) as exc:
-            result.errors.append((path_str, str(exc)))
+        except Exception as exc:
+            # Capture volontairement large (pas seulement
+            # UnreadableImageError/OSError/ValueError) : Pillow peut lever,
+            # selon le format et le type de corruption, des exceptions qui
+            # n'heritent d'aucune de ces classes - notamment
+            # PIL.Image.DecompressionBombError (en-tete corrompu ou piege
+            # revendiquant des dimensions demesurees), qui herite directement
+            # d'Exception. Avant ce correctif, un seul fichier dans cet etat
+            # faisait avorter tout le scan sans rien committer du lot en
+            # cours (bug trouve a l'audit) au lieu d'etre traite comme les
+            # autres fichiers illisibles ci-dessus (errors, compteur inclus).
+            result.errors.append((path_str, f"{type(exc).__name__}: {exc}"))
             if progress_callback:
                 progress_callback(index, result.total_found, path_str)
             continue

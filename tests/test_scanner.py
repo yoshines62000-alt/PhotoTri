@@ -1,8 +1,10 @@
+import struct
 import sys
 import tempfile
 import time
 import unittest
 import unittest.mock
+import zlib
 from pathlib import Path
 
 from PIL import Image
@@ -24,6 +26,27 @@ def _make_photo(path: Path, color=(120, 40, 200), taken_at: str = None) -> None:
         img.save(path, exif=exif)
     else:
         img.save(path)
+
+
+def _make_decompression_bomb_png(path: Path, width: int = 60000, height: int = 60000) -> None:
+    """Fabrique un PNG dont l'en-tete IHDR revendique des dimensions
+    demesurees (60000x60000 par defaut) alors que le fichier reste minuscule
+    - reproduit fidelement un en-tete corrompu ou piege (audit du
+    2026-07-22, C1) : on part d'un vrai petit PNG valide puis on ecrase
+    uniquement les 8 octets width/height de son chunk IHDR (en recalculant
+    le CRC32 du chunk pour que Pillow accepte toujours le fichier comme un
+    PNG bien forme et tente de le decoder)."""
+    real = path.with_suffix(".tmp.png")
+    Image.new("RGB", (4, 4), "red").save(real, format="PNG")
+    data = bytearray(real.read_bytes())
+    real.unlink()
+
+    assert data[12:16] == b"IHDR"
+    struct.pack_into(">II", data, 16, width, height)
+    chunk_type_and_data = bytes(data[12:12 + 4 + 13])
+    new_crc = zlib.crc32(chunk_type_and_data) & 0xFFFFFFFF
+    struct.pack_into(">I", data, 12 + 4 + 13, new_crc)
+    path.write_bytes(bytes(data))
 
 
 class TestScanFolder(unittest.TestCase):
@@ -87,6 +110,30 @@ class TestScanFolder(unittest.TestCase):
         self.assertEqual(len(result.errors), 1)
         self.assertIn(str(bogus), result.errors[0][0])
         self.assertEqual(self.db.count_photos(), 1)
+
+    def test_decompression_bomb_does_not_abort_the_whole_scan(self):
+        # Verrouille C1 (audit du 2026-07-22) : avant le correctif, seules
+        # (UnidentifiedImageError, OSError, ValueError) etaient interceptees
+        # autour du decodage - PIL.Image.DecompressionBombError herite
+        # directement d'Exception et remontait donc brute, faisant avorter
+        # tout scan_folder() (aucun commit du lot en cours) pour un seul
+        # fichier a l'en-tete corrompu/piege. Ici, 2 photos valides
+        # entourent un PNG dont l'en-tete revendique 60000x60000 pixels : le
+        # scan doit traiter les 2 photos valides et journaliser la bombe
+        # comme une simple erreur par fichier, sans exception non geree.
+        _make_photo(self.photos_dir / "avant.jpg")
+        _make_photo(self.photos_dir / "apres.jpg")
+        bomb = self.photos_dir / "piege.png"
+        _make_decompression_bomb_png(bomb)
+
+        result = scanner.scan_folder(self.photos_dir, self.db)
+
+        self.assertEqual(result.total_found, 3)
+        self.assertEqual(result.scanned, 2)
+        self.assertEqual(len(result.errors), 1)
+        self.assertIn(str(bomb), result.errors[0][0])
+        self.assertIn("DecompressionBomb", result.errors[0][1])
+        self.assertEqual(self.db.count_photos(), 2)
 
     def test_deleted_file_is_pruned_from_index(self):
         path_a = self.photos_dir / "a.jpg"

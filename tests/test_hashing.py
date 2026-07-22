@@ -1,6 +1,8 @@
+import struct
 import sys
 import tempfile
 import unittest
+import zlib
 from pathlib import Path
 
 from PIL import Image, ImageDraw
@@ -8,6 +10,28 @@ from PIL import Image, ImageDraw
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import hashing
+
+
+def _make_decompression_bomb_png(path: Path, width: int = 60000, height: int = 60000) -> None:
+    """Fabrique un PNG dont l'en-tete IHDR revendique des dimensions
+    demesurees (60000x60000 par defaut) alors que le fichier reste minuscule
+    - reproduit fidelement un en-tete corrompu ou piege (audit du
+    2026-07-22, C1) : on part d'un vrai petit PNG valide puis on ecrase
+    uniquement les 8 octets width/height de son chunk IHDR (en recalculant
+    le CRC32 du chunk pour que Pillow accepte toujours le fichier comme un
+    PNG bien forme et tente de le decoder, plutot que de le rejeter des la
+    verification de signature)."""
+    real = path.with_suffix(".tmp.png")
+    Image.new("RGB", (4, 4), "red").save(real, format="PNG")
+    data = bytearray(real.read_bytes())
+    real.unlink()
+
+    assert data[12:16] == b"IHDR"
+    struct.pack_into(">II", data, 16, width, height)
+    chunk_type_and_data = bytes(data[12:12 + 4 + 13])
+    new_crc = zlib.crc32(chunk_type_and_data) & 0xFFFFFFFF
+    struct.pack_into(">I", data, 12 + 4 + 13, new_crc)
+    path.write_bytes(bytes(data))
 
 
 def _make_image(path: Path, kind: str = "gradient", size=(64, 64)) -> None:
@@ -92,6 +116,20 @@ class TestDHash(unittest.TestCase):
         with self.assertRaises(hashing.UnreadableImageError):
             hashing.compute_dhash_from_path(bogus)
 
+    def test_decompression_bomb_header_is_reported_as_unreadable_not_fatal(self):
+        # Verrouille C1 (audit du 2026-07-22) : PIL.Image.DecompressionBombError
+        # herite directement d'Exception (ni OSError ni ValueError) - un
+        # en-tete PNG corrompu ou piege revendiquant des dimensions
+        # demesurees (60000x60000 ici, comme dans l'audit) ne doit jamais
+        # fuiter cette exception brute hors de compute_dhash_from_path : elle
+        # doit etre convertie en UnreadableImageError, exactement comme
+        # n'importe quel autre fichier illisible, pour que l'appelant
+        # (scanner.scan_folder) puisse continuer le scan au lieu d'avorter.
+        bomb = self.tmp / "bomb.png"
+        _make_decompression_bomb_png(bomb)
+        with self.assertRaises(hashing.UnreadableImageError):
+            hashing.compute_dhash_from_path(bomb)
+
     def test_hamming_distance_symmetric(self):
         self.assertEqual(hashing.hamming_distance(0b1010, 0b0110), hashing.hamming_distance(0b0110, 0b1010))
         self.assertEqual(hashing.hamming_distance(0b1111, 0b1111), 0)
@@ -139,6 +177,52 @@ class TestHeicSupport(unittest.TestCase):
             img.thumbnail((32, 32))
             self.assertLessEqual(img.size[0], 32)
             self.assertLessEqual(img.size[1], 32)
+
+
+class TestFormatRestrictionIsAppliedOnOpen(unittest.TestCase):
+    """Verrouille D1 (audit du 2026-07-22) : le filtrage par extension
+    (is_image_file/IMAGE_EXTENSIONS) n'est PAS une barriere de securite -
+    Pillow determine le format reel d'un fichier par son contenu, pas par
+    son nom. Ces tests verrouillent la mitigation ceinture-et-bretelles :
+    Image.open() est desormais toujours appele avec
+    formats=ALLOWED_PILLOW_FORMATS, ce qui fait echouer proprement
+    (UnreadableImageError, deja geree comme "fichier illisible, ignore")
+    toute ouverture d'un fichier dont le contenu reel est un format hors de
+    cette liste, quelle que soit son extension."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+
+    def test_extension_alone_does_not_guarantee_the_real_format(self):
+        # Preuve du constat de l'audit : is_image_file() se fie uniquement
+        # au suffixe du nom de fichier, un .jpg dont le contenu reel est un
+        # format totalement different passe donc ce filtre sans encombre.
+        disguised = self.tmp / "deguise.jpg"
+        Image.new("RGB", (16, 16), "green").save(disguised, format="PPM")
+        self.assertTrue(hashing.is_image_file(disguised))
+        with Image.open(disguised) as img:
+            self.assertNotEqual(img.format, "JPEG")
+
+    def test_disguised_file_with_allowed_content_still_opens(self):
+        # Un fichier .jpg dont le contenu reel est un PNG (deguisement
+        # frequent et inoffensif : simple renommage manuel) doit continuer a
+        # s'ouvrir normalement - PNG fait partie des formats autorises.
+        disguised = self.tmp / "vraiment_un_png.jpg"
+        Image.new("RGB", (16, 16), "green").save(disguised, format="PNG")
+        h = hashing.compute_dhash_from_path(disguised)
+        self.assertIsInstance(h, int)
+
+    def test_disguised_file_with_disallowed_content_is_rejected(self):
+        # Un fichier .jpg dont le contenu reel est un format que Pillow sait
+        # decoder mais que PhotoTri n'a jamais l'intention de traiter (ici
+        # PPM, hors de ALLOWED_PILLOW_FORMATS) doit etre rejete comme
+        # illisible plutot que decode par son "vrai" decodeur - exactement
+        # le vecteur decrit dans l'audit (PSD/FITS/ICO/etc. deguises en
+        # .jpg/.png, combine a une eventuelle CVE Pillow non corrigee - D2).
+        disguised = self.tmp / "deguise.jpg"
+        Image.new("RGB", (16, 16), "green").save(disguised, format="PPM")
+        with self.assertRaises(hashing.UnreadableImageError):
+            hashing.compute_dhash_from_path(disguised)
 
 
 class TestIsImageFile(unittest.TestCase):

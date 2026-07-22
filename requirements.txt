@@ -1,2 +1,10 @@
-Pillow>=10.0
+# Plancher releve suite a un audit de securite (2026-07-22) : Pillow>=10.0
+# incluait entierement la plage 10.3.0-12.1.1, vulnerable a
+# CVE-2026-25990 (ecriture hors limites via PSD forge, CVSS 8.9, corrigee en
+# 12.1.1) et CVE-2026-40192 (bombe de decompression via FITS, corrigee en
+# 12.2.0). 12.3.0 est la derniere version publiee au moment de l'audit et
+# corrige des problemes de securite additionnels (boucle infinie sur
+# BeginBinary, lectures hors limites McIdas/JPEG2000) : c'est le plancher
+# retenu plutot que de se caler au minimum strict 12.2.0.
+Pillow>=12.3.0
 pillow-heif>=0.15

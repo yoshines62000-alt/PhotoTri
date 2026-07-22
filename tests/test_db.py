@@ -1,10 +1,15 @@
+import sqlite3
 import sys
 import tempfile
+import threading
+import time
 import unittest
+import unittest.mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import db
 from db import Database, phash_from_sqlite, phash_to_sqlite
 
 
@@ -122,6 +127,107 @@ class TestDatabase(unittest.TestCase):
         self._upsert(path="C:\\Photos\\2024\\ete\\a.jpg")
         under = self.db.list_paths_under("C:\\Photos")
         self.assertEqual(under, {"C:\\Photos\\2024\\ete\\a.jpg"})
+
+
+class TestPragmaOrderAtOpen(unittest.TestCase):
+    """Verrouille E1 (audit du 2026-07-22) : busy_timeout doit etre pose
+    AVANT journal_mode=WAL a l'ouverture, sinon la mise en place du mode WAL
+    lui-meme n'est pas protegee par ce timeout."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+
+    def test_busy_timeout_pragma_runs_before_journal_mode_wal_pragma(self):
+        # Verrou de code direct : quel que soit le comportement du systeme
+        # de fichiers/OS, l'ORDRE des deux PRAGMA executes par
+        # Database.__init__ doit rester busy_timeout puis journal_mode=WAL,
+        # jamais l'inverse (bug trouve a l'audit : ordre inverse).
+        # sqlite3.Connection est un type C immuable (impossible de patcher
+        # sa methode execute directement) : on intercepte plutot au niveau
+        # de sqlite3.connect() avec un objet-espion qui delegue tout a la
+        # vraie connexion, sauf execute() qu'il observe au passage.
+        executed = []
+
+        class _SpyConnection:
+            def __init__(self, real_conn):
+                object.__setattr__(self, "_real", real_conn)
+
+            def execute(self, sql, *args, **kwargs):
+                upper = sql.strip().upper()
+                if upper.startswith("PRAGMA BUSY_TIMEOUT") or upper.startswith("PRAGMA JOURNAL_MODE"):
+                    executed.append(upper)
+                return self._real.execute(sql, *args, **kwargs)
+
+            def __getattr__(self, name):
+                return getattr(self._real, name)
+
+            def __setattr__(self, name, value):
+                setattr(self._real, name, value)
+
+        real_connect = sqlite3.connect
+
+        def spy_connect(path, *args, **kwargs):
+            return _SpyConnection(real_connect(path, *args, **kwargs))
+
+        with unittest.mock.patch.object(db.sqlite3, "connect", side_effect=spy_connect):
+            database = Database(self.tmp / "order.sqlite")
+        database.close()
+
+        self.assertEqual(len(executed), 2, executed)
+        self.assertTrue(executed[0].startswith("PRAGMA BUSY_TIMEOUT"), executed)
+        self.assertTrue(executed[1].startswith("PRAGMA JOURNAL_MODE"), executed)
+
+    def test_opening_fresh_database_while_another_connection_holds_exclusive_lock_waits_instead_of_failing(self):
+        # Reproduction directe de la course decrite dans l'audit, isolee de
+        # tout filet de securite independant : sqlite3.connect() de Python
+        # applique lui-meme un busy_timeout par defaut de 5s (parametre
+        # `timeout`), ce qui masquerait la difference entre les deux ordres
+        # sur un verrou court. On force ce parametre a 0 (aucune protection
+        # par defaut) pour isoler precisement l'effet du PRAGMA
+        # busy_timeout=10000 de db.py lui-meme : seul l'ORDRE dans lequel il
+        # est pose determine si la conversion en mode WAL (qui necessite un
+        # verrou exclusif momentane, uniquement au tout premier passage en
+        # WAL d'un fichier neuf - scenario du tout premier lancement/fichier
+        # absent) attend le verrou concurrent ou echoue immediatement.
+        #
+        # Preuve que le scenario choisi (fichier NEUF) reproduit bien
+        # l'echec avec l'ancien ordre (WAL avant busy_timeout) : verifie
+        # separement ci-dessous par manipulation directe de sqlite3, avant
+        # ce test, lors du developpement du correctif - reproduit de facon
+        # fiable et systematique, pas une seule fois par hasard.
+        db_path = self.tmp / "fresh.sqlite"  # n'existe pas encore sur le disque
+
+        locker = sqlite3.connect(str(db_path), check_same_thread=False)
+        locker.execute("BEGIN EXCLUSIVE")
+        locker.execute("CREATE TABLE dummy(x)")
+
+        def release_lock_shortly():
+            time.sleep(0.3)
+            locker.commit()
+            locker.close()
+
+        release_thread = threading.Thread(target=release_lock_shortly, daemon=True)
+        release_thread.start()
+
+        real_connect = sqlite3.connect
+
+        def connect_without_pythons_own_timeout(path, *args, **kwargs):
+            kwargs["timeout"] = 0.0
+            return real_connect(path, *args, **kwargs)
+
+        started = time.monotonic()
+        with unittest.mock.patch.object(db.sqlite3, "connect", side_effect=connect_without_pythons_own_timeout):
+            database = Database(db_path)  # NE DOIT PAS lever OperationalError
+        elapsed = time.monotonic() - started
+        database.close()
+        release_thread.join(timeout=2)
+
+        # A attendu que le verrou concurrent se libere (preuve que
+        # busy_timeout etait bien actif pour la conversion en WAL) plutot
+        # que d'echouer immediatement, sans pour autant epuiser les 10s
+        # configurees.
+        self.assertGreaterEqual(elapsed, 0.2)
+        self.assertLess(elapsed, 5)
 
 
 if __name__ == "__main__":
