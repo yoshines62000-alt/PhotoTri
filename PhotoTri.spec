@@ -36,4 +36,10 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     icon=['icon.ico'],
+    # Correctif audit G1 : embarque des metadonnees de version Windows
+    # (FileVersion/ProductVersion/CompanyName/FileDescription/...) dans
+    # l'executable, absentes auparavant (onglet "Details" des proprietes
+    # Windows entierement vide) - voir version_info.txt pour le detail et
+    # la procedure de mise a jour a chaque nouvelle version.
+    version='version_info.txt',
 )

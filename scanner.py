@@ -147,13 +147,28 @@ def scan_folder(
             path_str = str(path)
             seen_paths.add(path_str)
             try:
-                stat = path.stat()
+                # os.stat(hashing.long_path(path)) plutot que path.stat() -
+                # correctif M1 de l'audit : un chemin dont la longueur totale
+                # depasse l'ancienne limite Windows MAX_PATH (260 caracteres)
+                # est desormais reellement lu quand le systeme le permet, au
+                # lieu de se contenter de l'echec gracieux deja en place
+                # (capture OSError ci-dessous, inchangee pour tout le reste).
+                stat = os.stat(hashing.long_path(path))
             except OSError as exc:
                 result.errors.append((path_str, str(exc)))
                 if progress_callback:
                     progress_callback(index, result.total_found, path_str)
                 continue
 
+            # Rehachage uniquement si taille OU date de modification a
+            # change depuis le dernier scan connu - limite theorique mineure
+            # assumee (B3 de l'audit) : un outil qui modifierait le contenu
+            # d'un fichier en preservant intentionnellement sa taille ET son
+            # mtime exacts (rare - certains outils de synchronisation/
+            # edition EXIF en place) ne serait pas detecte comme change.
+            # Compromis standard et raisonnable pour la performance d'un
+            # rescan incremental sur une grosse bibliotheque - la plupart des
+            # outils de deduplication incrementale font ce meme choix.
             existing = db.get_photo_by_path(path_str)
             if existing is not None and existing["size"] == stat.st_size and existing["mtime"] == stat.st_mtime:
                 result.skipped_unchanged += 1
@@ -163,7 +178,7 @@ def scan_folder(
 
             try:
                 sha = hashing.file_sha256(path)
-                with Image.open(path, formats=hashing.ALLOWED_PILLOW_FORMATS) as img:
+                with Image.open(hashing.long_path(path), formats=hashing.ALLOWED_PILLOW_FORMATS) as img:
                     width, height = img.size
                     taken_at = _extract_taken_at(img)
                     phash = hashing.compute_dhash(img)

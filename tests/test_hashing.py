@@ -2,6 +2,7 @@ import struct
 import sys
 import tempfile
 import unittest
+import unittest.mock
 import warnings
 import zlib
 from pathlib import Path
@@ -356,6 +357,83 @@ class TestIsImageFile(unittest.TestCase):
     def test_rejects_non_image_extensions(self):
         for name in ("document.pdf", "notes.txt", "archive.zip"):
             self.assertFalse(hashing.is_image_file(Path(name)), name)
+
+
+class TestLongPathPrefix(unittest.TestCase):
+    """Verrouille M1 (audit du 2026-07-22) : un chemin Windows absolu qui
+    depasse l'ancienne limite MAX_PATH (260 caracteres) doit recevoir le
+    prefixe etendu ``\\\\?\\`` (ou ``\\\\?\\UNC\\`` pour un chemin reseau)
+    avant tout appel systeme (open/os.stat), pour permettre de le lire
+    reellement plutot que de se contenter de l'echec gracieux deja en place
+    (fichier compte comme "illisible", scan/hachage jamais interrompus)."""
+
+    def test_short_path_is_returned_unchanged(self):
+        short = "C:\\Photos\\a.jpg"
+        self.assertEqual(hashing.long_path(short), short)
+
+    def test_long_local_path_gets_the_extended_prefix(self):
+        raw = "C:\\Photos\\" + ("a" * 300) + ".jpg"
+        self.assertGreaterEqual(len(raw), 260)
+        result = hashing.long_path(raw)
+        self.assertTrue(result.startswith("\\\\?\\"))
+        self.assertTrue(result.endswith(raw))
+
+    def test_long_unc_path_gets_the_unc_extended_prefix(self):
+        raw = "\\\\serveur\\partage\\" + ("a" * 300) + ".jpg"
+        self.assertGreaterEqual(len(raw), 260)
+        result = hashing.long_path(raw)
+        self.assertTrue(result.startswith("\\\\?\\UNC\\"), result[:20])
+        self.assertNotIn("\\\\?\\UNC\\\\", result, "le double backslash du chemin UNC d'origine ne doit pas etre duplique")
+
+    def test_already_prefixed_path_is_left_untouched(self):
+        raw = "\\\\?\\C:\\Photos\\" + ("a" * 300) + ".jpg"
+        self.assertEqual(hashing.long_path(raw), raw)
+
+    def test_accepts_path_objects_not_only_strings(self):
+        long_name = "a" * 300 + ".jpg"
+        raw_path = Path("C:\\Photos\\" + long_name)
+        result = hashing.long_path(raw_path)
+        self.assertTrue(result.startswith("\\\\?\\"))
+
+    def test_non_windows_platform_never_adds_a_prefix(self):
+        raw = "C:\\Photos\\" + ("a" * 300) + ".jpg"
+        with unittest.mock.patch.object(hashing.os, "name", "posix"):
+            self.assertEqual(hashing.long_path(raw), raw)
+
+    def test_file_sha256_uses_long_path_for_the_actual_open_call(self):
+        # Verrouille le cablage reel (pas seulement l'existence de la
+        # fonction pure) : file_sha256 doit passer par long_path() pour
+        # ouvrir le fichier, pas par le chemin brut.
+        tmp = Path(tempfile.mkdtemp())
+        p = tmp / "a.bin"
+        p.write_bytes(b"contenu")
+        calls = []
+        real_long_path = hashing.long_path
+
+        def spy(path):
+            calls.append(str(path))
+            return real_long_path(path)
+
+        with unittest.mock.patch.object(hashing, "long_path", side_effect=spy):
+            digest = hashing.file_sha256(p)
+        self.assertEqual(calls, [str(p)])
+        self.assertEqual(digest, hashing.file_sha256(p))
+
+    def test_compute_dhash_from_path_uses_long_path_for_the_actual_open_call(self):
+        tmp = Path(tempfile.mkdtemp())
+        p = tmp / "gradient.png"
+        _make_image(p, "gradient")
+        calls = []
+        real_long_path = hashing.long_path
+
+        def spy(path):
+            calls.append(str(path))
+            return real_long_path(path)
+
+        with unittest.mock.patch.object(hashing, "long_path", side_effect=spy):
+            h = hashing.compute_dhash_from_path(p)
+        self.assertEqual(calls, [str(p)])
+        self.assertIsInstance(h, int)
 
 
 if __name__ == "__main__":

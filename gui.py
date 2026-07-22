@@ -47,6 +47,32 @@ RELEASES_URL = f"https://github.com/{UPDATE_REPO}/releases/latest"
 THUMBNAIL_SIZE = (150, 150)
 BODY_FONT = ("Segoe UI", 10)
 
+# Gris utilise pour tout le texte "secondaire" (taille/dimensions/date sur
+# les cartes, barre de statut, numero de version...) - #595959 plutot que le
+# #666 initial (bug trouve a l'audit, F4) : sur le fond du theme ttk "alt"
+# utilise par l'application (#d9d9d9), #666 offrait un ratio de contraste
+# WCAG d'environ 4.07:1, sous le seuil de 4.5:1 requis par le niveau AA pour
+# du texte de taille normale - #595959 offre environ 4.9:1, au-dessus du
+# seuil, pour un rendu visuellement quasi identique.
+SECONDARY_TEXT_COLOR = "#595959"
+
+# Couleur des etoiles pleines du controle de notation (J1, voir
+# _build_rating_stars) - dore, pour se distinguer nettement du texte
+# secondaire (SECONDARY_TEXT_COLOR) utilise pour les etoiles vides.
+RATING_STAR_COLOR = "#c9a227"
+RATING_MAX = 5
+
+# Textes du panneau de detail affiches tant qu'aucun groupe n'est
+# selectionne a gauche - varient selon l'etat reel de l'application
+# (correctif de l'audit, F3 : avant ce correctif, le tout premier message
+# restait affiche tel quel meme pendant un scan deja en cours sur un
+# dossier deja choisi, ce qui n'avait plus de sens des que l'utilisateur
+# avait clairement depasse cette etape).
+PLACEHOLDER_TEXT_INITIAL = "Choisissez un dossier, lancez une analyse, puis selectionnez un groupe a gauche."
+PLACEHOLDER_TEXT_SCANNING = "Analyse en cours..."
+PLACEHOLDER_TEXT_SELECT_GROUP = "Selectionnez un groupe a gauche pour voir le detail."
+PLACEHOLDER_TEXT_EMPTY = "Aucun doublon ni quasi-doublon trouve dans les photos indexees."
+
 
 def _resource_path(relative: str) -> Path:
     base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
@@ -206,6 +232,25 @@ class PhotoTriApp:
         self._selected_group = None
         self._thumbnail_refs: list = []
         self._checkbox_vars: dict = {}
+        # Widgets etoiles de notation (J1) indexes par id de photo, pour que
+        # les clics ("<Button-1>") et un rafraichissement ulterieur puissent
+        # retrouver les 5 Label d'une carte sans reparcourir tout le canvas.
+        self._rating_star_labels: dict = {}
+        # Identifiants Tcl des gestionnaires de clic lies aux etoiles
+        # actuellement affichees (voir _build_rating_stars/_show_group_detail) -
+        # necessaires pour les liberer explicitement (Widget.destroy() ne le
+        # fait PAS automatiquement : une commande enregistree via .bind()
+        # reste vivante dans l'interpreteur Tcl tant qu'elle n'est pas
+        # explicitement supprimee ou que la racine Tk elle-meme n'est pas
+        # detruite) avant de reconstruire les cartes - sans ce nettoyage,
+        # chaque changement de groupe affiche laisse une fermeture Python
+        # orpheline referencant `self`, un cycle de references que seul le
+        # ramasse-miettes cyclique peut resoudre ; observe en ecrivant ce
+        # correctif : leur accumulation au fil de nombreuses reconstructions
+        # de cartes pouvait retarder une collecte cyclique ulterieure au
+        # point de faire paraitre l'application figee pendant plusieurs
+        # secondes.
+        self._rating_star_funcids: list = []
         self._grouping_in_progress = False
         self._grouping_thread = None
         self._grouping_queue: "queue.Queue" = queue.Queue()
@@ -284,7 +329,7 @@ class PhotoTriApp:
         self.progress_bar = ttk.Progressbar(progress_frame, orient=HORIZONTAL, mode="determinate")
         self.progress_bar.pack(fill=X, side=TOP)
         self.status_var = StringVar(value="")
-        ttk.Label(progress_frame, textvariable=self.status_var, foreground="#666").pack(anchor="w", pady=(2, 8))
+        ttk.Label(progress_frame, textvariable=self.status_var, foreground=SECONDARY_TEXT_COLOR).pack(anchor="w", pady=(2, 8))
 
         body = ttk.PanedWindow(self.root, orient=HORIZONTAL)
         body.pack(fill=BOTH, expand=True, padx=10, pady=(0, 5))
@@ -316,9 +361,9 @@ class PhotoTriApp:
 
         bottom_bar = ttk.Frame(self.root)
         bottom_bar.pack(fill=X, side="bottom")
-        ttk.Label(bottom_bar, text=f"v{APP_VERSION}", foreground="#666").pack(side=LEFT, padx=(8, 0), pady=4)
+        ttk.Label(bottom_bar, text=f"v{APP_VERSION}", foreground=SECONDARY_TEXT_COLOR).pack(side=LEFT, padx=(8, 0), pady=4)
         self.update_status_var = StringVar(value="")
-        self.update_status_label = ttk.Label(bottom_bar, textvariable=self.update_status_var, foreground="#666")
+        self.update_status_label = ttk.Label(bottom_bar, textvariable=self.update_status_var, foreground=SECONDARY_TEXT_COLOR)
         self.update_status_label.pack(side=LEFT, padx=(6, 0), pady=4)
         donate_label = ttk.Label(bottom_bar, text="☕ Soutenir le projet", foreground="#0645AD", cursor="hand2")
         donate_label.pack(side=RIGHT, padx=8, pady=4)
@@ -346,7 +391,7 @@ class PhotoTriApp:
 
     def _build_detail_panel(self, parent):
         self.detail_placeholder = ttk.Label(
-            parent, text="Choisissez un dossier, lancez une analyse, puis selectionnez un groupe a gauche.",
+            parent, text=PLACEHOLDER_TEXT_INITIAL,
             foreground="black", font=BODY_FONT, wraplength=500, justify="left",
         )
         self.detail_placeholder.pack(padx=15, pady=15, anchor="w")
@@ -503,6 +548,15 @@ class PhotoTriApp:
         self.progress_bar.configure(mode="indeterminate")
         self.progress_bar.start(10)
         self.status_var.set("Analyse en cours...")
+        # Texte du panneau de detail mis a jour pour refleter l'etat reel de
+        # l'application (correctif de l'audit, F3) : avant ce correctif, le
+        # message d'accueil initial ("Choisissez un dossier...") restait
+        # affiche tel quel meme pendant un scan deja en cours sur un dossier
+        # deja choisi - sans effet visible si un groupe est actuellement
+        # affiche (le placeholder est alors masque), mais correct des que
+        # l'utilisateur revient au panneau de detail (aucun groupe
+        # selectionne) pendant le scan.
+        self.detail_placeholder.configure(text=PLACEHOLDER_TEXT_SCANNING)
 
         # Capture depuis le thread principal (Tkinter StringVar) avant de
         # lancer le thread de scan : le dossier de revision courant, quel
@@ -730,10 +784,15 @@ class PhotoTriApp:
             )
 
         self._show_group_detail(None)
-        if not self._groups:
-            self.detail_placeholder.configure(
-                text="Aucun doublon ni quasi-doublon trouve dans les photos indexees.",
-            )
+        # Texte du placeholder mis a jour selon le resultat reel du calcul
+        # (F3 de l'audit) : "Aucun doublon..." si le regroupement est vide
+        # (deja gere avant ce correctif), sinon une invite a selectionner un
+        # groupe plutot que de laisser trainer le message d'accueil initial
+        # ("Choisissez un dossier...") ou "Analyse en cours..." (F3), qui
+        # n'ont plus de sens une fois qu'un calcul de groupes a abouti.
+        self.detail_placeholder.configure(
+            text=PLACEHOLDER_TEXT_EMPTY if not self._groups else PLACEHOLDER_TEXT_SELECT_GROUP,
+        )
 
         group_message = f"{len(self._groups)} groupe(s) de doublons/quasi-doublons trouve(s)."
         prefix = self._pending_status_prefix
@@ -751,6 +810,17 @@ class PhotoTriApp:
         self._selected_group = group
         self._thumbnail_refs = []
         self._checkbox_vars = {}
+        self._rating_star_labels = {}
+        # Libere explicitement les commandes Tcl des etoiles de l'affichage
+        # precedent AVANT de detruire les cartes (voir le commentaire de
+        # _rating_star_funcids dans __init__) - Widget.destroy() ne le fait
+        # pas tout seul.
+        for star_label, funcid in self._rating_star_funcids:
+            try:
+                star_label.deletecommand(funcid)
+            except Exception:
+                pass
+        self._rating_star_funcids = []
         for widget in self.cards_inner.winfo_children():
             widget.destroy()
 
@@ -790,7 +860,12 @@ class PhotoTriApp:
         thumb_label = ttk.Label(card)
         thumb_label.pack()
         try:
-            with Image.open(photo["path"], formats=hashing.ALLOWED_PILLOW_FORMATS) as img:
+            # hashing.long_path() (M1) plutot que photo["path"] directement :
+            # permet d'afficher la vignette d'une photo dont le chemin
+            # complet depasse MAX_PATH quand Windows le permet, au lieu de
+            # se contenter de l'echec gracieux ("[image indisponible]")
+            # deja en place ci-dessous.
+            with Image.open(hashing.long_path(photo["path"]), formats=hashing.ALLOWED_PILLOW_FORMATS) as img:
                 # draft() accelere nettement le decodage JPEG quand on ne
                 # veut qu'une vignette (no-op silencieux sur les formats non
                 # JPEG) - optimisation trouvee a l'audit, le decodage pleine
@@ -807,8 +882,8 @@ class PhotoTriApp:
         filename = Path(photo["path"]).name
         ttk.Label(card, text=filename, foreground="black", font=BODY_FONT, wraplength=THUMBNAIL_SIZE[0]).pack()
         dims = f"{photo['width'] or '?'} x {photo['height'] or '?'}" if photo["width"] else "Dimensions inconnues"
-        ttk.Label(card, text=f"{dims} - {_format_size(photo['size'])}", foreground="#666").pack()
-        ttk.Label(card, text=photo["taken_at"][:10] if photo["taken_at"] else "Date inconnue", foreground="#666").pack()
+        ttk.Label(card, text=f"{dims} - {_format_size(photo['size'])}", foreground=SECONDARY_TEXT_COLOR).pack()
+        ttk.Label(card, text=photo["taken_at"][:10] if photo["taken_at"] else "Date inconnue", foreground=SECONDARY_TEXT_COLOR).pack()
 
         # Distance par rapport a la photo suggeree gardee (A2 de l'audit) :
         # avant ce correctif, rien sur une carte ne permettait de savoir a
@@ -817,17 +892,77 @@ class PhotoTriApp:
         # notion de distance de Hamming n'y a pas la meme portee qu'un
         # quasi-doublon, on l'annonce donc differemment.
         if group_kind == "exact":
-            ttk.Label(card, text="Copie exacte (fichier identique)", foreground="#666").pack()
+            ttk.Label(card, text="Copie exacte (fichier identique)", foreground=SECONDARY_TEXT_COLOR).pack()
         else:
             distance = hashing.hamming_distance(phash_from_sqlite(photo["phash"]), keeper_phash)
-            ttk.Label(card, text=f"Distance : {distance}/{self._last_threshold}", foreground="#666").pack()
+            ttk.Label(card, text=f"Distance : {distance}/{self._last_threshold}", foreground=SECONDARY_TEXT_COLOR).pack()
 
         if is_keeper:
             ttk.Label(card, text="★ Suggeree a garder", foreground="#1B7A1B", font=BODY_FONT).pack(pady=(2, 0))
 
+        # Notation 0-5 etoiles (correctif de l'audit, J1) : la colonne
+        # `rating`/`Database.set_rating()` etaient entierement implementees
+        # et testees cote donnees mais jamais exposees dans l'interface -
+        # utile en pratique pour departager plusieurs quasi-doublons de
+        # qualite proche (flou, cadrage...) avant de choisir lesquels
+        # deplacer.
+        self._build_rating_stars(card, photo["id"], photo["rating"])
+
         check_var = BooleanVar(value=not is_keeper)
         self._checkbox_vars[photo["id"]] = check_var
         ttk.Checkbutton(card, text="A deplacer", variable=check_var).pack(pady=(4, 0))
+
+    def _build_rating_stars(self, parent, photo_id: int, current_rating: int) -> None:
+        """Construit la rangee de RATING_MAX (5) etoiles cliquables d'une
+        carte photo (J1 de l'audit) - chaque etoile represente une note de
+        1 a son rang ; cliquer sur l'etoile deja active en position `n`
+        reinitialise la note a 0 (seul moyen d'annuler une notation, voir
+        _set_photo_rating)."""
+        stars_frame = ttk.Frame(parent)
+        stars_frame.pack(pady=(4, 0))
+        labels = []
+        for value in range(1, RATING_MAX + 1):
+            star_label = ttk.Label(stars_frame, font=BODY_FONT, cursor="hand2")
+            star_label.pack(side=LEFT)
+            # funcid conserve (voir _rating_star_funcids) pour pouvoir
+            # liberer explicitement cette commande Tcl lorsque cette carte
+            # sera reconstruite/detruite - sans quoi la fermeture ci-dessous
+            # (qui referme sur `self`) resterait enregistree dans
+            # l'interpreteur au-dela de la duree de vie reelle de la carte.
+            funcid = star_label.bind("<Button-1>", lambda event, v=value: self._set_photo_rating(photo_id, v))
+            self._rating_star_funcids.append((star_label, funcid))
+            labels.append(star_label)
+        self._rating_star_labels[photo_id] = labels
+        self._refresh_rating_stars(photo_id, current_rating)
+
+    def _refresh_rating_stars(self, photo_id: int, rating: int) -> None:
+        """Redessine les etoiles d'une carte (pleines/vides, couleur) selon
+        `rating` - separee de _set_photo_rating pour pouvoir aussi etre
+        appelee juste apres la construction initiale de la carte
+        (_build_rating_stars), sans dupliquer la logique d'affichage."""
+        labels = self._rating_star_labels.get(photo_id)
+        if not labels:
+            return
+        for position, star_label in enumerate(labels, start=1):
+            filled = position <= rating
+            star_label.configure(
+                text="★" if filled else "☆",
+                foreground=RATING_STAR_COLOR if filled else SECONDARY_TEXT_COLOR,
+            )
+
+    def _set_photo_rating(self, photo_id: int, value: int) -> None:
+        """Gestionnaire de clic sur une etoile (J1) : definit la note de
+        `photo_id` a `value`, sauf si elle y est deja - dans ce cas la note
+        est reinitialisee a 0 (toggle), seul moyen d'annuler une notation
+        deja attribuee puisqu'aucune autre commande ne le permet. Persiste
+        immediatement via Database.set_rating (deja teste independamment,
+        voir tests/test_db.py) puis redessine seulement les etoiles de cette
+        carte, sans recalculer/reafficher tout le groupe."""
+        row = self.db.get_photo(photo_id)
+        current = row["rating"] if row is not None else 0
+        new_rating = 0 if current == value else value
+        self.db.set_rating(photo_id, new_rating)
+        self._refresh_rating_stars(photo_id, new_rating)
 
     # -- deplacement non destructif -------------------------------------------------
 

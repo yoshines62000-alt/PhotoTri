@@ -23,6 +23,10 @@ accord.
   quasi-doublons selon vos besoins.
 - **Suggestion automatique** : dans chaque groupe, la photo à conserver
   est pré-suggérée (meilleure résolution, puis meilleure qualité).
+- **Notation 0 à 5 étoiles** : notez chaque photo directement sur sa carte
+  pour départager plusieurs quasi-doublons de qualité proche avant de
+  choisir lesquels déplacer (cliquer sur une étoile déjà active réinitialise
+  la note).
 - **Rangement non destructif** : les doublons sélectionnés sont
   **déplacés** vers un dossier de révision de votre choix — jamais
   supprimés automatiquement.
@@ -30,7 +34,12 @@ accord.
   nouveaux ou modifiés, rapide même sur une grosse bibliothèque.
 - **Formats pris en charge** : JPEG, PNG, BMP, GIF, TIFF, WebP, ainsi que
   **HEIC/HEIF** (format par défaut des photos iPhone depuis 2017), grâce à
-  la dépendance `pillow-heif` incluse.
+  la dépendance `pillow-heif` incluse. Pour un **GIF animé**, seule la
+  première image (frame) est prise en compte pour la détection de
+  quasi-doublons et l'aperçu. Les formats **RAW** (CR2, NEF, ARW, DNG...)
+  ne sont **pas pris en charge** : un dossier contenant des photos RAW+JPEG
+  ne verra dédupliquer que la partie JPEG, sans message d'avertissement
+  pour les fichiers RAW ignorés.
 - **100 % local, zéro cloud** : aucune connexion réseau, aucun compte,
   aucune télémétrie.
 - **Gratuit et open source, pour toujours**.

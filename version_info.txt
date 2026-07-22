@@ -1,0 +1,45 @@
+# UTF-8
+#
+# Ressource de version Windows pour PhotoTri.exe (PyInstaller), reference
+# par `version='version_info.txt'` dans l'appel EXE(...) de PhotoTri.spec.
+#
+# Correctif de l'audit expert (constat G1) : sans ce fichier, l'onglet
+# "Details" des proprietes Windows de l'executable distribue n'affichait
+# aucune metadonnee (FileVersion/ProductVersion a 0.0.0.0, CompanyName/
+# FileDescription/LegalCopyright vides) - genant pour le support et
+# l'inventaire logiciel en entreprise. Meme demarche que celle deja
+# appliquee au projet Coffre du meme auteur pour le meme constat.
+#
+# IMPORTANT : filevers/prodvers et les chaines FileVersion/ProductVersion
+# ci-dessous doivent etre mis a jour EN MEME TEMPS que APP_VERSION dans
+# gui.py a chaque nouvelle version (pas de generation automatique - ce
+# fichier est lu par PyInstaller via un mini-parseur dedie, pas par
+# l'interpreteur Python, il ne peut donc pas importer gui.py directement).
+VSVersionInfo(
+  ffi=FixedFileInfo(
+    filevers=(1, 0, 8, 0),
+    prodvers=(1, 0, 8, 0),
+    mask=0x3f,
+    flags=0x0,
+    OS=0x40004,
+    fileType=0x1,
+    subtype=0x0,
+    date=(0, 0),
+    ),
+  kids=[
+    StringFileInfo(
+      [
+      StringTable(
+        u'040c04b0',
+        [StringStruct(u'CompanyName', u'john.dev62'),
+        StringStruct(u'FileDescription', u'PhotoTri - detecteur de photos en double et quasi-en-double'),
+        StringStruct(u'FileVersion', u'1.0.8'),
+        StringStruct(u'InternalName', u'PhotoTri'),
+        StringStruct(u'LegalCopyright', u'Copyright (c) 2026 john.dev62 - licence MIT'),
+        StringStruct(u'OriginalFilename', u'PhotoTri.exe'),
+        StringStruct(u'ProductName', u'PhotoTri'),
+        StringStruct(u'ProductVersion', u'1.0.8')])
+      ]),
+    VarFileInfo([VarStruct(u'Translation', [1036, 1200])])
+  ]
+)

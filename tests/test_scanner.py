@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from db import Database
 import grouping
+import hashing
 import scanner
 
 _TAG_DATETIME_ORIGINAL = 36867
@@ -391,6 +392,29 @@ class TestScanFolder(unittest.TestCase):
             groups_after, [],
             "le doublon range ne doit pas reapparaitre dans un groupe apres rescan",
         )
+
+    # -- support des chemins longs (correctif de l'audit, M1) ----------------------
+
+    def test_scan_routes_file_access_through_long_path(self):
+        # Verrouille le cablage reel de M1 au niveau du scanner (pas
+        # seulement au niveau des fonctions pures de hashing.py, deja
+        # verrouillees separement dans tests/test_hashing.py) : os.stat()
+        # doit passer par hashing.long_path(path), pas par path.stat()
+        # directement - seul moyen pour un chemin depassant MAX_PATH d'etre
+        # reellement lu plutot que de simplement echouer proprement.
+        _make_photo(self.photos_dir / "a.jpg")
+        calls = []
+        real_long_path = hashing.long_path
+
+        def spy(path):
+            calls.append(str(path))
+            return real_long_path(path)
+
+        with unittest.mock.patch.object(hashing, "long_path", side_effect=spy):
+            result = scanner.scan_folder(self.photos_dir, self.db)
+
+        self.assertEqual(result.scanned, 1)
+        self.assertIn(str(self.photos_dir / "a.jpg"), calls)
 
 
 if __name__ == "__main__":

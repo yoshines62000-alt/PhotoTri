@@ -13,6 +13,7 @@ compromis assume : ces cas plus complexes sortent du champ de l'outil.
 from __future__ import annotations
 
 import hashlib
+import os
 from pathlib import Path
 
 from PIL import Image
@@ -29,6 +30,17 @@ pillow_heif.register_heif_opener()
 HASH_SIZE = 8  # -> hash de HASH_SIZE * HASH_SIZE bits (64 bits par defaut)
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".tiff", ".tif", ".webp", ".heic", ".heif"}
+
+# Limite assumee (A4 de l'audit) : pour un GIF ANIME, `Image.open()` seul
+# n'expose que la premiere frame (Pillow ne saute jamais automatiquement a
+# une frame suivante sans appel explicite a `img.seek()`) - ni le hachage
+# exact (sha256, sur l'octet du fichier entier, non affecte) ni le hachage
+# perceptuel (dHash, ci-dessous) ne tiennent donc compte des frames
+# suivantes d'un GIF anime. Impact reel juge marginal (les GIF animes ne
+# representent qu'une fraction infime d'une phototheque personnelle) :
+# documente dans le README plutot que corrige par un hachage multi-frame,
+# qui ajouterait de la complexite pour un benefice tres limite au vu de la
+# frequence d'usage reelle.
 
 # Le filtrage par extension (is_image_file, ci-dessous) n'est PAS une
 # barriere de securite : Pillow determine le format reel d'un fichier par
@@ -54,6 +66,48 @@ class UnreadableImageError(Exception):
     PermissionError), que l'appelant doit traiter separement."""
 
 
+# Longueur totale de chemin (en caracteres) au-dela de laquelle Windows peut
+# refuser d'ouvrir un fichier faute de support "long path" active - la vraie
+# limite historique MAX_PATH est 260, mais quelques caracteres de marge
+# (plutot que pile 260) evitent de rater les cas limites lies aux variations
+# de comptage entre composants du chemin.
+_WINDOWS_MAX_PATH = 260
+
+
+def long_path(path) -> str:
+    """Renvoie une representation de `path` utilisable pour les appels
+    systeme (open, os.stat...) sans etre soumise a l'ancienne limite
+    MAX_PATH (260 caracteres) de Windows : prefixe les chemins absolus
+    suffisamment longs par ``\\\\?\\`` (chemin "etendu", ou ``\\\\?\\UNC\\``
+    pour un partage reseau) - un prefixe reconnu nativement par les API
+    Windows sous-jacentes, qui contourne MAX_PATH sans necessiter le moindre
+    reglage systeme (contrairement au support "long path" opt-in de
+    Windows 10+, jamais garanti actif sur la machine de l'utilisateur).
+
+    Correctif de l'audit (M1) : avant ce correctif, un chemin trop long
+    echouait proprement (deja rattrape comme "fichier illisible, ignore" par
+    les try/except deja en place dans scanner.py/gui.py - degradation
+    gracieuse) mais SANS JAMAIS ETRE REELLEMENT LU, alors meme que Windows
+    aurait pu le lire via ce prefixe. No-op (renvoie `str(path)` sans
+    modification) sur toute plateforme non-Windows, tout chemin deja assez
+    court, ou deja prefixe. Le prefixe change la semantique de resolution du
+    chemin par l'OS (pris litteralement, aucun ``.``/``..`` resolu par la
+    couche filesystem) : il ne doit donc etre applique qu'a un chemin deja
+    absolu et normalise, ce que garantissent tous les appelants actuels
+    (chemins construits par `os.walk`/`Path.resolve`, jamais saisis
+    librement par l'utilisateur a cet endroit)."""
+    text = str(path)
+    if os.name != "nt" or len(text) < _WINDOWS_MAX_PATH or text.startswith("\\\\?\\"):
+        return text
+    if text.startswith("\\\\"):
+        # Chemin UNC (\\serveur\partage\...) : le prefixe etendu
+        # correspondant est \\?\UNC\serveur\partage\..., pas simplement
+        # \\?\ colle devant - sinon Windows interpreterait l'ensemble comme
+        # un chemin local commencant par un backslash litteral.
+        return "\\\\?\\UNC\\" + text.lstrip("\\")
+    return "\\\\?\\" + text
+
+
 def file_sha256(path: Path, chunk_size: int = 1 << 20) -> str:
     """Empreinte du contenu OCTET PAR OCTET du fichier. Deux fichiers avec
     ce meme hash sont des doublons exacts au sens strict (copie bit a bit,
@@ -61,7 +115,7 @@ def file_sha256(path: Path, chunk_size: int = 1 << 20) -> str:
     qui peut rapprocher deux fichiers visuellement identiques mais
     physiquement differents (recompression, metadonnees EXIF differentes)."""
     digest = hashlib.sha256()
-    with open(path, "rb") as f:
+    with open(long_path(path), "rb") as f:
         for chunk in iter(lambda: f.read(chunk_size), b""):
             digest.update(chunk)
     return digest.hexdigest()
@@ -114,9 +168,13 @@ def compute_dhash_from_path(path: Path, hash_size: int = HASH_SIZE) -> int:
     ou piege revendiquant des dimensions demesurees. Avant ce correctif, une
     telle exception remontait brute et faisait avorter tout le scan pour un
     seul fichier (bug trouve a l'audit) au lieu d'etre traitee comme les
-    autres fichiers illisibles."""
+    autres fichiers illisibles.
+
+    `long_path(path)` (M1) plutot que `path` directement : permet de lire un
+    fichier dont le chemin complet depasse MAX_PATH quand Windows le
+    permet, au lieu de se contenter de l'echec gracieux deja en place."""
     try:
-        with Image.open(path, formats=ALLOWED_PILLOW_FORMATS) as img:
+        with Image.open(long_path(path), formats=ALLOWED_PILLOW_FORMATS) as img:
             return compute_dhash(img, hash_size=hash_size)
     except Exception as exc:
         raise UnreadableImageError(f"Image illisible : {path} ({type(exc).__name__}: {exc})") from exc
@@ -190,9 +248,10 @@ def compute_color_signature(image: Image.Image, size: int = 12) -> tuple:
 def compute_color_signature_from_path(path: Path, size: int = 12) -> tuple:
     """Equivalent de compute_dhash_from_path pour compute_color_signature :
     memes garanties (formats restreints via ALLOWED_PILLOW_FORMATS, capture
-    large des erreurs de decodage converties en UnreadableImageError)."""
+    large des erreurs de decodage converties en UnreadableImageError,
+    prefixe long_path (M1) applique de la meme facon)."""
     try:
-        with Image.open(path, formats=ALLOWED_PILLOW_FORMATS) as img:
+        with Image.open(long_path(path), formats=ALLOWED_PILLOW_FORMATS) as img:
             return compute_color_signature(img, size=size)
     except Exception as exc:
         raise UnreadableImageError(f"Image illisible : {path} ({type(exc).__name__}: {exc})") from exc

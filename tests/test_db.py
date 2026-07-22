@@ -230,5 +230,107 @@ class TestPragmaOrderAtOpen(unittest.TestCase):
         self.assertLess(elapsed, 5)
 
 
+class TestSchemaMigrations(unittest.TestCase):
+    """Verrouille E3 (audit du 2026-07-22) : jusqu'ici, _create_schema()
+    n'utilisait que CREATE TABLE IF NOT EXISTS (no-op sur une table deja
+    existante) - sans aucun mecanisme de migration, une base d'utilisateur
+    creee par une version anterieure ne recevrait jamais une colonne ajoutee
+    par une future version. `PRAGMA user_version` compare a `db.SCHEMA_VERSION`
+    (le nombre de migrations enregistrees dans `db._MIGRATIONS`) doit
+    combler ce trou a chaque ouverture."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+
+    def test_fresh_database_is_stamped_with_the_current_schema_version(self):
+        path = self.tmp / "fresh.sqlite"
+        database = Database(path)
+        try:
+            version = database.conn.execute("PRAGMA user_version").fetchone()[0]
+            self.assertEqual(version, db.SCHEMA_VERSION)
+        finally:
+            database.close()
+
+    def test_pending_migration_is_applied_to_an_older_database_on_open(self):
+        # Simule une base creee par une version anterieure du schema
+        # (user_version reste a 0 par defaut tant qu'aucune migration n'a
+        # jamais ete appliquee) : table "photos" deja existante SANS une
+        # colonne hypothetique qu'une migration future ajouterait, avec une
+        # ligne de donnees deja presente (doit survivre a la migration).
+        path = self.tmp / "old.sqlite"
+        raw = sqlite3.connect(str(path))
+        raw.executescript("""
+            CREATE TABLE photos (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                path TEXT NOT NULL UNIQUE,
+                size INTEGER NOT NULL,
+                mtime REAL NOT NULL,
+                width INTEGER,
+                height INTEGER,
+                sha256 TEXT NOT NULL,
+                phash INTEGER NOT NULL,
+                taken_at TEXT,
+                rating INTEGER NOT NULL DEFAULT 0 CHECK (rating BETWEEN 0 AND 5),
+                status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'moved')),
+                moved_to TEXT,
+                scanned_at TEXT NOT NULL
+            );
+        """)
+        raw.execute(
+            "INSERT INTO photos (path, size, mtime, sha256, phash, scanned_at) VALUES (?, ?, ?, ?, ?, ?)",
+            ("C:/old.jpg", 100, 1.0, "sha", 0, "2026-01-01"),
+        )
+        raw.commit()
+        raw.close()
+
+        migration_calls = []
+
+        def add_hypothetical_column(conn):
+            migration_calls.append(True)
+            conn.execute("ALTER TABLE photos ADD COLUMN note_test TEXT")
+
+        with unittest.mock.patch.object(db, "_MIGRATIONS", [add_hypothetical_column]), \
+                unittest.mock.patch.object(db, "SCHEMA_VERSION", 1):
+            database = Database(path)
+            try:
+                self.assertEqual(migration_calls, [True], "la migration en attente doit avoir ete appliquee")
+                columns = [row[1] for row in database.conn.execute("PRAGMA table_info(photos)").fetchall()]
+                self.assertIn("note_test", columns, "la colonne ajoutee par la migration doit exister")
+                version = database.conn.execute("PRAGMA user_version").fetchone()[0]
+                self.assertEqual(version, 1)
+                # Les donnees existantes doivent survivre a la migration.
+                row = database.get_photo_by_path("C:/old.jpg")
+                self.assertIsNotNone(row)
+                self.assertEqual(row["sha256"], "sha")
+            finally:
+                database.close()
+
+    def test_migration_is_not_reapplied_on_a_database_already_at_the_current_version(self):
+        path = self.tmp / "already_current.sqlite"
+        Database(path).close()
+
+        calls = []
+
+        def should_never_run(conn):
+            calls.append(True)
+
+        # SCHEMA_VERSION reste inchangee (deja egale a len(_MIGRATIONS)
+        # reel, 0 aujourd'hui) : cette "migration" hypothetique ajoutee
+        # SEULE a _MIGRATIONS (sans relever SCHEMA_VERSION en meme temps) ne
+        # doit jamais s'executer sur une base deja a la version courante -
+        # verrouille la garde `current != SCHEMA_VERSION`/le slicing borne
+        # de _apply_migrations, pas seulement le cas "liste vide" trivial.
+        with unittest.mock.patch.object(db, "_MIGRATIONS", [should_never_run]):
+            database2 = Database(path)
+            database2.close()
+        self.assertEqual(calls, [], "aucune migration ne doit s'executer sur une base deja a la version courante")
+
+    def test_schema_version_matches_the_number_of_registered_migrations(self):
+        # Verrou de coherence : SCHEMA_VERSION doit toujours refleter
+        # len(_MIGRATIONS), jamais une constante maintenue separement a la
+        # main (source d'oubli garantie a la premiere migration ajoutee).
+        self.assertEqual(db.SCHEMA_VERSION, len(db._MIGRATIONS))
+
+
 if __name__ == "__main__":
     unittest.main()

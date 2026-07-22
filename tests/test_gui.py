@@ -5,6 +5,7 @@ dans l'audit du 2026-07-22), invisibles a la seule lecture du code. Ignores
 proprement (`skipTest`) si aucun affichage n'est disponible pour ouvrir une
 fenetre Tk (ex. environnement CI sans serveur graphique)."""
 
+import gc
 import shutil
 import sqlite3
 import sys
@@ -45,6 +46,23 @@ class TestFolderLabelDoesNotHideActionButtons(unittest.TestCase):
     caracteres)."""
 
     def setUp(self):
+        # Force une collecte cyclique AVANT de creer un nouveau Tk() -
+        # observe en ecrivant ces tests : ce fichier cree/detruit des
+        # dizaines de racines Tk reelles a la suite, et Widget.destroy() ne
+        # libere pas les commandes Tcl enregistrees via .bind()/`command=`
+        # (seule la destruction de l'interpreteur/racine le fait) - les
+        # fermetures Python qui en decoulent (souvent auto-referentes via
+        # `self`) restent alors comme garbage CYCLIQUE, que seul gc.collect()
+        # peut liberer (le comptage de references seul ne suffit pas). Sans
+        # ce nettoyage explicite entre les tests, ce garbage s'accumule au
+        # fil de l'execution complete de la suite au point de retarder une
+        # collecte automatique ulterieure pile pendant l'attente bornee
+        # d'un thread d'arriere-plan (calcul de groupes) ci-dessous,
+        # jusqu'a lui faire depasser son delai - un artefact de la suite de
+        # tests elle-meme (aucune consequence pour l'application reelle, qui
+        # ne cree jamais des dizaines de fenetres Tk a la suite dans le
+        # meme processus).
+        gc.collect()
         try:
             self.root = Tk()
         except TclError as exc:
@@ -146,6 +164,23 @@ class TestMoveButtonLabelFitsItsOwnWidth(unittest.TestCase):
     revision :")."""
 
     def setUp(self):
+        # Force une collecte cyclique AVANT de creer un nouveau Tk() -
+        # observe en ecrivant ces tests : ce fichier cree/detruit des
+        # dizaines de racines Tk reelles a la suite, et Widget.destroy() ne
+        # libere pas les commandes Tcl enregistrees via .bind()/`command=`
+        # (seule la destruction de l'interpreteur/racine le fait) - les
+        # fermetures Python qui en decoulent (souvent auto-referentes via
+        # `self`) restent alors comme garbage CYCLIQUE, que seul gc.collect()
+        # peut liberer (le comptage de references seul ne suffit pas). Sans
+        # ce nettoyage explicite entre les tests, ce garbage s'accumule au
+        # fil de l'execution complete de la suite au point de retarder une
+        # collecte automatique ulterieure pile pendant l'attente bornee
+        # d'un thread d'arriere-plan (calcul de groupes) ci-dessous,
+        # jusqu'a lui faire depasser son delai - un artefact de la suite de
+        # tests elle-meme (aucune consequence pour l'application reelle, qui
+        # ne cree jamais des dizaines de fenetres Tk a la suite dans le
+        # meme processus).
+        gc.collect()
         try:
             self.root = Tk()
         except TclError as exc:
@@ -225,6 +260,23 @@ class TestConfidenceIndicatorInUI(unittest.TestCase):
     vignettes des cartes se generent normalement."""
 
     def setUp(self):
+        # Force une collecte cyclique AVANT de creer un nouveau Tk() -
+        # observe en ecrivant ces tests : ce fichier cree/detruit des
+        # dizaines de racines Tk reelles a la suite, et Widget.destroy() ne
+        # libere pas les commandes Tcl enregistrees via .bind()/`command=`
+        # (seule la destruction de l'interpreteur/racine le fait) - les
+        # fermetures Python qui en decoulent (souvent auto-referentes via
+        # `self`) restent alors comme garbage CYCLIQUE, que seul gc.collect()
+        # peut liberer (le comptage de references seul ne suffit pas). Sans
+        # ce nettoyage explicite entre les tests, ce garbage s'accumule au
+        # fil de l'execution complete de la suite au point de retarder une
+        # collecte automatique ulterieure pile pendant l'attente bornee
+        # d'un thread d'arriere-plan (calcul de groupes) ci-dessous,
+        # jusqu'a lui faire depasser son delai - un artefact de la suite de
+        # tests elle-meme (aucune consequence pour l'application reelle, qui
+        # ne cree jamais des dizaines de fenetres Tk a la suite dans le
+        # meme processus).
+        gc.collect()
         try:
             self.root = Tk()
         except TclError as exc:
@@ -368,6 +420,23 @@ class TestOrphanCopyNotLeftUnindexedOnMoveFailure(unittest.TestCase):
     laisser aucun fichier partiel trainer dans le dossier de revision."""
 
     def setUp(self):
+        # Force une collecte cyclique AVANT de creer un nouveau Tk() -
+        # observe en ecrivant ces tests : ce fichier cree/detruit des
+        # dizaines de racines Tk reelles a la suite, et Widget.destroy() ne
+        # libere pas les commandes Tcl enregistrees via .bind()/`command=`
+        # (seule la destruction de l'interpreteur/racine le fait) - les
+        # fermetures Python qui en decoulent (souvent auto-referentes via
+        # `self`) restent alors comme garbage CYCLIQUE, que seul gc.collect()
+        # peut liberer (le comptage de references seul ne suffit pas). Sans
+        # ce nettoyage explicite entre les tests, ce garbage s'accumule au
+        # fil de l'execution complete de la suite au point de retarder une
+        # collecte automatique ulterieure pile pendant l'attente bornee
+        # d'un thread d'arriere-plan (calcul de groupes) ci-dessous,
+        # jusqu'a lui faire depasser son delai - un artefact de la suite de
+        # tests elle-meme (aucune consequence pour l'application reelle, qui
+        # ne cree jamais des dizaines de fenetres Tk a la suite dans le
+        # meme processus).
+        gc.collect()
         try:
             self.root = Tk()
         except TclError as exc:
@@ -558,6 +627,23 @@ class TestShowFriendlyErrorDisplaysTranslatedMessageAndLogsDetail(unittest.TestC
     perdu, simplement plus impose en premiere lecture)."""
 
     def setUp(self):
+        # Force une collecte cyclique AVANT de creer un nouveau Tk() -
+        # observe en ecrivant ces tests : ce fichier cree/detruit des
+        # dizaines de racines Tk reelles a la suite, et Widget.destroy() ne
+        # libere pas les commandes Tcl enregistrees via .bind()/`command=`
+        # (seule la destruction de l'interpreteur/racine le fait) - les
+        # fermetures Python qui en decoulent (souvent auto-referentes via
+        # `self`) restent alors comme garbage CYCLIQUE, que seul gc.collect()
+        # peut liberer (le comptage de references seul ne suffit pas). Sans
+        # ce nettoyage explicite entre les tests, ce garbage s'accumule au
+        # fil de l'execution complete de la suite au point de retarder une
+        # collecte automatique ulterieure pile pendant l'attente bornee
+        # d'un thread d'arriere-plan (calcul de groupes) ci-dessous,
+        # jusqu'a lui faire depasser son delai - un artefact de la suite de
+        # tests elle-meme (aucune consequence pour l'application reelle, qui
+        # ne cree jamais des dizaines de fenetres Tk a la suite dans le
+        # meme processus).
+        gc.collect()
         try:
             self.root = Tk()
         except TclError as exc:
@@ -633,6 +719,23 @@ class TestDiskSpaceCheckBeforeBatchMove(unittest.TestCase):
     l'optimisation "meme volume, os.rename() ne copie rien"."""
 
     def setUp(self):
+        # Force une collecte cyclique AVANT de creer un nouveau Tk() -
+        # observe en ecrivant ces tests : ce fichier cree/detruit des
+        # dizaines de racines Tk reelles a la suite, et Widget.destroy() ne
+        # libere pas les commandes Tcl enregistrees via .bind()/`command=`
+        # (seule la destruction de l'interpreteur/racine le fait) - les
+        # fermetures Python qui en decoulent (souvent auto-referentes via
+        # `self`) restent alors comme garbage CYCLIQUE, que seul gc.collect()
+        # peut liberer (le comptage de references seul ne suffit pas). Sans
+        # ce nettoyage explicite entre les tests, ce garbage s'accumule au
+        # fil de l'execution complete de la suite au point de retarder une
+        # collecte automatique ulterieure pile pendant l'attente bornee
+        # d'un thread d'arriere-plan (calcul de groupes) ci-dessous,
+        # jusqu'a lui faire depasser son delai - un artefact de la suite de
+        # tests elle-meme (aucune consequence pour l'application reelle, qui
+        # ne cree jamais des dizaines de fenetres Tk a la suite dans le
+        # meme processus).
+        gc.collect()
         try:
             self.root = Tk()
         except TclError as exc:
@@ -796,6 +899,301 @@ class TestDiskSpaceCheckBeforeBatchMove(unittest.TestCase):
         self.assertFalse(move_path.exists())
         dest_path = self.review_dir / "a_deplacer4.jpg"
         self.assertTrue(dest_path.exists())
+
+
+class TestPlaceholderTextReflectsAppState(unittest.TestCase):
+    """Verrouille F3 (audit du 2026-07-22) : le texte du panneau de detail
+    (affiche tant qu'aucun groupe n'est selectionne a gauche) doit refleter
+    l'etat reel de l'application - message d'accueil initial, "Analyse en
+    cours..." pendant un scan deja lance, puis une invite a selectionner un
+    groupe ou "Aucun doublon..." une fois le regroupement termine - au lieu
+    de rester fige sur le tout premier message quel que soit l'etat reel
+    (bug trouve a l'audit : le message d'accueil restait affiche meme
+    pendant un scan deja en cours sur un dossier deja choisi)."""
+
+    def setUp(self):
+        # Force une collecte cyclique AVANT de creer un nouveau Tk() -
+        # observe en ecrivant ces tests : ce fichier cree/detruit des
+        # dizaines de racines Tk reelles a la suite, et Widget.destroy() ne
+        # libere pas les commandes Tcl enregistrees via .bind()/`command=`
+        # (seule la destruction de l'interpreteur/racine le fait) - les
+        # fermetures Python qui en decoulent (souvent auto-referentes via
+        # `self`) restent alors comme garbage CYCLIQUE, que seul gc.collect()
+        # peut liberer (le comptage de references seul ne suffit pas). Sans
+        # ce nettoyage explicite entre les tests, ce garbage s'accumule au
+        # fil de l'execution complete de la suite au point de retarder une
+        # collecte automatique ulterieure pile pendant l'attente bornee
+        # d'un thread d'arriere-plan (calcul de groupes) ci-dessous,
+        # jusqu'a lui faire depasser son delai - un artefact de la suite de
+        # tests elle-meme (aucune consequence pour l'application reelle, qui
+        # ne cree jamais des dizaines de fenetres Tk a la suite dans le
+        # meme processus).
+        gc.collect()
+        try:
+            self.root = Tk()
+        except TclError as exc:
+            self.skipTest(f"Pas d'affichage disponible pour un test Tk reel : {exc}")
+        self.tmp_dir = Path(tempfile.mkdtemp())
+        self._apps = []
+        self._patchers = [
+            mock.patch("tkinter.messagebox.showerror"),
+            mock.patch("tkinter.messagebox.showwarning"),
+            mock.patch("tkinter.messagebox.showinfo"),
+        ]
+        for p in self._patchers:
+            p.start()
+            self.addCleanup(p.stop)
+
+    def tearDown(self):
+        for app in self._apps:
+            try:
+                app.db.close()
+            except Exception:
+                pass
+        try:
+            self.root.destroy()
+        except TclError:
+            pass
+
+    def _make_app(self) -> "gui.PhotoTriApp":
+        with mock.patch.object(gui, "_data_dir", return_value=self.tmp_dir / "appdata"), \
+             mock.patch.object(gui.update_checker, "start_update_check"):
+            app = gui.PhotoTriApp(self.root)
+        self._apps.append(app)
+        return app
+
+    def _wait_grouping_idle(self, app, timeout=15):
+        # Meme pattern que TestConfidenceIndicatorInUI (deja eprouve dans ce
+        # fichier) : n'attend QUE le regroupement, pas un scan reel - un
+        # vrai thread de scan (nouvelle connexion SQLite, vrai decodage
+        # d'image) est plus lourd et s'est avere sujet a une instabilite
+        # Tcl/Tk propre a cet environnement de test quand il est combine a
+        # de nombreux autres cycles Tk() dans le meme processus (observe en
+        # ecrivant ces tests) - inutile ici, ces scenarios ne testent que le
+        # texte affiche APRES un regroupement, jamais le scan lui-meme.
+        deadline = time.monotonic() + timeout
+        while app._grouping_in_progress:
+            self.root.update()
+            time.sleep(0.01)
+            self.assertLess(time.monotonic(), deadline, "le calcul de groupes ne se termine jamais")
+        self.root.update()
+
+    def test_initial_text_before_any_interaction(self):
+        app = self._make_app()
+        self.assertEqual(app.detail_placeholder.cget("text"), gui.PLACEHOLDER_TEXT_INITIAL)
+
+    def test_text_switches_to_scanning_as_soon_as_a_scan_starts(self):
+        app = self._make_app()
+        app.selected_folder = self.tmp_dir
+        # Le thread de scan reel (nouvelle connexion SQLite, decodage
+        # d'image) n'a aucun rapport avec ce qui est verrouille ici (la mise
+        # a jour SYNCHRONE du texte du placeholder, avant meme que le thread
+        # ne demarre) : `threading.Thread` est neutralisee pour qu'aucun
+        # thread reel ne soit cree, evitant tout travail/IO superflu pour
+        # cette seule assertion.
+        with mock.patch.object(gui.threading, "Thread") as mock_thread_cls:
+            app._start_scan()
+            mock_thread_cls.assert_called_once()
+            mock_thread_cls.return_value.start.assert_called_once()
+        # Verifie AVANT tout root.update()/traitement de la file : le texte
+        # doit deja refleter "scan en cours" des l'appel a _start_scan, pas
+        # seulement une fois le scan effectivement termine.
+        self.assertEqual(app.detail_placeholder.cget("text"), gui.PLACEHOLDER_TEXT_SCANNING)
+
+    def test_text_invites_to_select_a_group_once_duplicates_are_found(self):
+        app = self._make_app()
+        p1 = self.tmp_dir / "a.jpg"
+        p2 = self.tmp_dir / "b.jpg"
+        Image.new("RGB", (16, 16), (10, 20, 30)).save(p1)
+        Image.new("RGB", (16, 16), (10, 20, 30)).save(p2)
+        app.db.upsert_photo(str(p1), 1000, 1.0, 16, 16, "sha-same", 0, None)
+        app.db.upsert_photo(str(p2), 1000, 1.0, 16, 16, "sha-same", 0, None)
+
+        app._refresh_groups()
+        self._wait_grouping_idle(app)
+
+        self.assertGreater(len(app._groups), 0)
+        self.assertEqual(app.detail_placeholder.cget("text"), gui.PLACEHOLDER_TEXT_SELECT_GROUP)
+
+    def test_text_shows_empty_message_when_no_duplicates_found(self):
+        app = self._make_app()
+        p = self.tmp_dir / "unique.jpg"
+        Image.new("RGB", (16, 16), (10, 20, 30)).save(p)
+        app.db.upsert_photo(str(p), 1000, 1.0, 16, 16, "sha-unique", 0, None)
+
+        app._refresh_groups()
+        self._wait_grouping_idle(app)
+
+        self.assertEqual(app._groups, [])
+        self.assertEqual(app.detail_placeholder.cget("text"), gui.PLACEHOLDER_TEXT_EMPTY)
+
+
+class TestSecondaryTextColorMeetsWcagAaContrast(unittest.TestCase):
+    """Verrouille F4 (audit du 2026-07-22) : le texte "secondaire" (taille/
+    dimensions/date sur les cartes, barre de statut, numero de version...)
+    doit atteindre un ratio de contraste WCAG AA (>= 4.5:1 pour du texte de
+    taille normale) sur le fond du theme ttk "alt" utilise par l'application
+    (#d9d9d9) - l'ancien gris #666 n'offrait qu'environ 4.07:1."""
+
+    @staticmethod
+    def _srgb_channel_to_linear(value: int) -> float:
+        c = value / 255
+        return c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
+
+    def _relative_luminance(self, hex_color: str) -> float:
+        hex_color = hex_color.lstrip("#")
+        r, g, b = (int(hex_color[i:i + 2], 16) for i in (0, 2, 4))
+        rl, gl, bl = (self._srgb_channel_to_linear(v) for v in (r, g, b))
+        return 0.2126 * rl + 0.7152 * gl + 0.0722 * bl
+
+    def _contrast_ratio(self, hex_a: str, hex_b: str) -> float:
+        la, lb = self._relative_luminance(hex_a), self._relative_luminance(hex_b)
+        lighter, darker = max(la, lb), min(la, lb)
+        return (lighter + 0.05) / (darker + 0.05)
+
+    def test_secondary_text_color_meets_aa_contrast_on_the_alt_theme_background(self):
+        ratio = self._contrast_ratio(gui.SECONDARY_TEXT_COLOR, "#d9d9d9")
+        self.assertGreaterEqual(ratio, 4.5, f"ratio de contraste {ratio:.2f}:1 insuffisant (seuil WCAG AA 4.5:1)")
+
+    def test_old_insufficiently_contrasted_gray_is_no_longer_used(self):
+        source = Path(gui.__file__).read_text(encoding="utf-8")
+        self.assertNotIn(
+            'foreground="#666"', source,
+            "l'ancien gris #666 (contraste WCAG insuffisant) ne doit plus etre utilise directement",
+        )
+
+
+class TestRatingStarsOnPhotoCard(unittest.TestCase):
+    """Verrouille J1 (audit du 2026-07-22) : la colonne `rating` et
+    `Database.set_rating()` etaient entierement implementees et testees cote
+    donnees (tests/test_db.py) mais jamais exposees dans l'interface. Chaque
+    carte photo doit desormais afficher RATING_MAX (5) etoiles cliquables,
+    refletant fidelement la note deja en base et permettant de la modifier -
+    avec reinitialisation a 0 en cliquant sur l'etoile deja active (seul
+    moyen d'annuler une notation)."""
+
+    def setUp(self):
+        # Force une collecte cyclique AVANT de creer un nouveau Tk() -
+        # observe en ecrivant ces tests : ce fichier cree/detruit des
+        # dizaines de racines Tk reelles a la suite, et Widget.destroy() ne
+        # libere pas les commandes Tcl enregistrees via .bind()/`command=`
+        # (seule la destruction de l'interpreteur/racine le fait) - les
+        # fermetures Python qui en decoulent (souvent auto-referentes via
+        # `self`) restent alors comme garbage CYCLIQUE, que seul gc.collect()
+        # peut liberer (le comptage de references seul ne suffit pas). Sans
+        # ce nettoyage explicite entre les tests, ce garbage s'accumule au
+        # fil de l'execution complete de la suite au point de retarder une
+        # collecte automatique ulterieure pile pendant l'attente bornee
+        # d'un thread d'arriere-plan (calcul de groupes) ci-dessous,
+        # jusqu'a lui faire depasser son delai - un artefact de la suite de
+        # tests elle-meme (aucune consequence pour l'application reelle, qui
+        # ne cree jamais des dizaines de fenetres Tk a la suite dans le
+        # meme processus).
+        gc.collect()
+        try:
+            self.root = Tk()
+        except TclError as exc:
+            self.skipTest(f"Pas d'affichage disponible pour un test Tk reel : {exc}")
+        self.tmp_dir = Path(tempfile.mkdtemp())
+        self._apps = []
+
+    def tearDown(self):
+        for app in self._apps:
+            try:
+                app.db.close()
+            except Exception:
+                pass
+        try:
+            self.root.destroy()
+        except TclError:
+            pass
+
+    def _make_app(self) -> "gui.PhotoTriApp":
+        with mock.patch.object(gui, "_data_dir", return_value=self.tmp_dir), \
+             mock.patch.object(gui.update_checker, "start_update_check"):
+            app = gui.PhotoTriApp(self.root)
+        self._apps.append(app)
+        return app
+
+    def _make_image_file(self, name: str) -> Path:
+        path = self.tmp_dir / name
+        Image.new("RGB", (16, 16), (10, 20, 30)).save(path)
+        return path
+
+    def _select_a_group(self, app, id1, id2):
+        group = grouping.PhotoGroup(kind="exact", photo_ids=sorted([id1, id2]), max_distance=0)
+        app._show_group_detail(group)
+        self.root.update()
+
+    def _make_two_photo_group(self, app):
+        p1 = self._make_image_file("a.jpg")
+        p2 = self._make_image_file("b.jpg")
+        id1 = app.db.upsert_photo(str(p1), 1000, 1.0, 800, 600, "sha-same", 0, None)
+        id2 = app.db.upsert_photo(str(p2), 1000, 1.0, 800, 600, "sha-same", 0, None)
+        self._select_a_group(app, id1, id2)
+        return id1, id2
+
+    def test_card_shows_five_star_labels_matching_zero_rating_by_default(self):
+        app = self._make_app()
+        id1, _ = self._make_two_photo_group(app)
+
+        labels = app._rating_star_labels[id1]
+        self.assertEqual(len(labels), gui.RATING_MAX)
+        self.assertTrue(all(lbl.cget("text") == "☆" for lbl in labels))
+
+    def test_card_reflects_rating_already_stored_in_db(self):
+        app = self._make_app()
+        p1 = self._make_image_file("a.jpg")
+        p2 = self._make_image_file("b.jpg")
+        id1 = app.db.upsert_photo(str(p1), 1000, 1.0, 800, 600, "sha-same", 0, None)
+        id2 = app.db.upsert_photo(str(p2), 1000, 1.0, 800, 600, "sha-same", 0, None)
+        app.db.set_rating(id1, 3)
+
+        self._select_a_group(app, id1, id2)
+
+        labels = app._rating_star_labels[id1]
+        filled = [lbl.cget("text") == "★" for lbl in labels]
+        self.assertEqual(filled, [True, True, True, False, False])
+
+    def test_clicking_a_star_sets_the_rating_and_persists_it(self):
+        app = self._make_app()
+        id1, _ = self._make_two_photo_group(app)
+
+        app._set_photo_rating(id1, 4)
+
+        self.assertEqual(app.db.get_photo(id1)["rating"], 4)
+        labels = app._rating_star_labels[id1]
+        filled = [lbl.cget("text") == "★" for lbl in labels]
+        self.assertEqual(filled, [True, True, True, True, False])
+
+    def test_clicking_the_already_active_star_resets_the_rating_to_zero(self):
+        app = self._make_app()
+        id1, _ = self._make_two_photo_group(app)
+        app._set_photo_rating(id1, 3)
+        self.assertEqual(app.db.get_photo(id1)["rating"], 3)
+
+        app._set_photo_rating(id1, 3)  # meme etoile -> toggle a 0
+
+        self.assertEqual(app.db.get_photo(id1)["rating"], 0)
+        labels = app._rating_star_labels[id1]
+        self.assertTrue(all(lbl.cget("text") == "☆" for lbl in labels))
+
+    def test_rating_of_one_photo_does_not_affect_the_other_photo_in_the_group(self):
+        app = self._make_app()
+        id1, id2 = self._make_two_photo_group(app)
+
+        app._set_photo_rating(id1, 5)
+
+        self.assertEqual(app.db.get_photo(id1)["rating"], 5)
+        self.assertEqual(app.db.get_photo(id2)["rating"], 0)
+        self.assertTrue(all(lbl.cget("text") == "☆" for lbl in app._rating_star_labels[id2]))
+
+    def test_each_star_label_has_a_click_handler_registered(self):
+        app = self._make_app()
+        id1, _ = self._make_two_photo_group(app)
+
+        for star_label in app._rating_star_labels[id1]:
+            self.assertTrue(star_label.bind("<Button-1>"), "chaque etoile doit avoir un gestionnaire de clic lie")
 
 
 if __name__ == "__main__":

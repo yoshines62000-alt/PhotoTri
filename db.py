@@ -40,6 +40,51 @@ def phash_from_sqlite(value: int) -> int:
     return struct.unpack("<Q", struct.pack("<q", value))[0]
 
 
+# Migrations de schema, dans l'ORDRE : chaque fonction recoit la connexion
+# sqlite3 (deja ouverte, hors de toute transaction explicite) et doit amener
+# le schema de la version correspondant a son INDEX dans cette liste a la
+# version suivante - ex. _MIGRATIONS[0] fait passer de la version 0 (base
+# jamais migree) a la version 1. Vide pour l'instant : le schema n'a jamais
+# change depuis la creation du projet (verifie a l'audit via
+# `git log --oneline -- db.py`, constat E3), cette liste n'existe qu'en
+# PREPARATION de la premiere evolution future du schema. Quand ce jour
+# viendra : ajouter la nouvelle colonne/table a `_create_schema` ci-dessous
+# (pour que les bases NEUVES la recoivent directement) ET ajouter ici une
+# fonction de migration correspondante, typiquement un `ALTER TABLE ... ADD
+# COLUMN ...` (pour que les bases EXISTANTES d'utilisateurs deja installes
+# la recoivent aussi a la prochaine ouverture) - les deux chemins doivent
+# aboutir au meme schema final.
+_MIGRATIONS: list = []
+
+# Version courante du schema = nombre de migrations enregistrees ci-dessus
+# (toujours en phase avec _MIGRATIONS, jamais a incrementer manuellement).
+# Comparee au PRAGMA user_version reellement stocke dans le fichier sqlite a
+# chaque ouverture (_apply_migrations) : risque prospectif identifie a
+# l'audit (E3) - jusqu'ici, `_create_schema` ci-dessous n'utilisait que
+# `CREATE TABLE IF NOT EXISTS` (no-op sur une table deja existante), sans
+# aucun filet si une future version ajoutait une colonne : les bases
+# utilisateur deja creees par une version anterieure ne l'auraient jamais
+# recue, et le premier INSERT/UPDATE la referencant aurait echoue avec
+# `sqlite3.OperationalError: no such column`.
+SCHEMA_VERSION = len(_MIGRATIONS)
+
+
+def _apply_migrations(conn: sqlite3.Connection) -> None:
+    """Amene `conn` du schema qu'elle a reellement (PRAGMA user_version,
+    0 par defaut pour toute base jamais migree - y compris une base creee
+    avant l'introduction de ce mecanisme) au schema courant (SCHEMA_VERSION),
+    en executant dans l'ordre les seules migrations manquantes. No-op total
+    (aucune lecture supplementaire, aucun commit) sur une base deja a jour -
+    c'est le cas de TOUTES les bases aujourd'hui, `_MIGRATIONS` etant encore
+    vide (E3 est un risque prospectif, pas un bug actuel)."""
+    current = conn.execute("PRAGMA user_version").fetchone()[0]
+    for migration in _MIGRATIONS[current:SCHEMA_VERSION]:
+        migration(conn)
+    if current != SCHEMA_VERSION:
+        conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION:d}")
+        conn.commit()
+
+
 class Database:
     """Enveloppe fine autour de sqlite3 : une connexion, un schema, des
     methodes CRUD explicites. Pas d'ORM."""
@@ -67,6 +112,14 @@ class Database:
         self.conn.execute("PRAGMA busy_timeout=10000")
         self.conn.execute("PRAGMA journal_mode=WAL")
         self._create_schema()
+        # Amene une base PRE-EXISTANTE (creee par une version anterieure) au
+        # schema courant si necessaire - voir _apply_migrations/E3. Applique
+        # APRES _create_schema : sur une base neuve, la table est deja creee
+        # dans son etat le plus recent (rien a migrer, simple marquage du
+        # numero de version) ; sur une base existante, _create_schema est un
+        # no-op (CREATE TABLE IF NOT EXISTS) et c'est cette etape qui fait le
+        # vrai travail de mise a niveau.
+        _apply_migrations(self.conn)
 
     def close(self) -> None:
         self.conn.close()
