@@ -41,7 +41,7 @@ from db import Database, phash_from_sqlite
 
 APP_TITLE = "PhotoTri"
 DONATE_URL = "https://ko-fi.com/yoshines62000"
-APP_VERSION = "1.0.5"
+APP_VERSION = "1.0.6"
 UPDATE_REPO = "yoshines62000-alt/PhotoTri"
 RELEASES_URL = f"https://github.com/{UPDATE_REPO}/releases/latest"
 THUMBNAIL_SIZE = (150, 150)
