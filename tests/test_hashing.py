@@ -225,6 +225,98 @@ class TestFormatRestrictionIsAppliedOnOpen(unittest.TestCase):
             hashing.compute_dhash_from_path(disguised)
 
 
+class TestIsLowEntropyHash(unittest.TestCase):
+    """Verrouille la detection introduite pour A1 (audit du 2026-07-22) :
+    un dHash dont le nombre de bits a 1 est proche de 0 ou du maximum
+    signale une image a variance locale quasi nulle (ciel uni, mur, neige,
+    photo tres sur/sous-exposee) - c'est ce genre de hash qui produisait des
+    faux positifs massifs, le dHash etant aveugle a la couleur/teinte reelle
+    de telles images."""
+
+    def test_zero_hash_is_low_entropy(self):
+        self.assertTrue(hashing.is_low_entropy_hash(0))
+
+    def test_all_ones_hash_is_low_entropy(self):
+        self.assertTrue(hashing.is_low_entropy_hash((1 << 64) - 1))
+
+    def test_near_zero_popcount_is_low_entropy(self):
+        self.assertTrue(hashing.is_low_entropy_hash(0b1111))  # popcount=4, marge par defaut
+
+    def test_balanced_hash_is_not_low_entropy(self):
+        # ~32 bits a 1 sur 64 - typique d'une vraie photo texturee.
+        balanced = int("10" * 32, 2)
+        self.assertFalse(hashing.is_low_entropy_hash(balanced))
+
+    def test_just_above_margin_is_not_low_entropy(self):
+        five_bits = 0b11111  # popcount=5 > marge par defaut (4)
+        self.assertFalse(hashing.is_low_entropy_hash(five_bits))
+
+
+class TestColorSignature(unittest.TestCase):
+    """Verrouille le second signal introduit pour A1 : deux images uniformes
+    de teintes totalement differentes doivent avoir des dHash identiques
+    (le dHash seul ne code que des comparaisons de luminosite entre pixels
+    adjacents) MAIS des signatures couleur nettement eloignees - c'est cette
+    difference que grouping.py exploite pour departager les faux positifs."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+
+    def _solid(self, color, name):
+        p = self.tmp / name
+        Image.new("RGB", (200, 200), color).save(p, quality=95)
+        return p
+
+    def test_solid_color_images_share_the_same_dhash(self):
+        # Reproduit exactement le constat de l'audit (A1) : rouge, bleu et
+        # vert uniformes ont tous un dHash de 0 - distance de Hamming 0
+        # entre eux, quel que soit le seuil configure.
+        red = self._solid((255, 0, 0), "red.jpg")
+        blue = self._solid((0, 0, 255), "blue.jpg")
+        green = self._solid((0, 255, 0), "green.jpg")
+        h_red = hashing.compute_dhash_from_path(red)
+        h_blue = hashing.compute_dhash_from_path(blue)
+        h_green = hashing.compute_dhash_from_path(green)
+        self.assertEqual(h_red, 0)
+        self.assertEqual(hashing.hamming_distance(h_red, h_blue), 0)
+        self.assertEqual(hashing.hamming_distance(h_red, h_green), 0)
+        self.assertTrue(hashing.is_low_entropy_hash(h_red))
+
+    def test_color_signature_distance_is_large_for_different_hues(self):
+        red = self._solid((255, 0, 0), "red.jpg")
+        blue = self._solid((0, 0, 255), "blue.jpg")
+        sig_red = hashing.compute_color_signature_from_path(red)
+        sig_blue = hashing.compute_color_signature_from_path(blue)
+        # Mesure a l'audit (voir grouping._LOW_ENTROPY_COLOR_MAX_DISTANCE,
+        # fixe a 150) : des teintes clairement distinctes sont toujours a
+        # plus de 750 de distance sur cette echelle (max possible 2295).
+        self.assertGreater(hashing.color_signature_distance(sig_red, sig_blue), 750)
+
+    def test_color_signature_distance_is_small_for_recompressed_same_color(self):
+        # La meme couleur, reencodee a une qualite JPEG differente, doit
+        # rester tres proche - le correctif A1 ne doit pas introduire de
+        # faux NEGATIF sur un vrai quasi-doublon de ce type.
+        a = self.tmp / "gray_a.jpg"
+        b = self.tmp / "gray_b.jpg"
+        Image.new("RGB", (200, 200), (128, 128, 128)).save(a, quality=95)
+        Image.new("RGB", (200, 200), (130, 130, 130)).save(b, quality=60)
+        sig_a = hashing.compute_color_signature_from_path(a)
+        sig_b = hashing.compute_color_signature_from_path(b)
+        self.assertLess(hashing.color_signature_distance(sig_a, sig_b), 150)
+
+    def test_identical_image_has_zero_color_distance(self):
+        p = self._solid((10, 200, 90), "solid.jpg")
+        sig1 = hashing.compute_color_signature_from_path(p)
+        sig2 = hashing.compute_color_signature_from_path(p)
+        self.assertEqual(hashing.color_signature_distance(sig1, sig2), 0)
+
+    def test_unreadable_image_raises(self):
+        bogus = self.tmp / "pas_une_image.jpg"
+        bogus.write_bytes(b"ceci n'est pas du tout une image")
+        with self.assertRaises(hashing.UnreadableImageError):
+            hashing.compute_color_signature_from_path(bogus)
+
+
 class TestIsImageFile(unittest.TestCase):
     def test_recognizes_common_extensions(self):
         for name in ("photo.jpg", "photo.JPEG", "photo.png", "photo.webp", "photo.heic"):

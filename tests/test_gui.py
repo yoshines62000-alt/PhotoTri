@@ -7,14 +7,18 @@ fenetre Tk (ex. environnement CI sans serveur graphique)."""
 
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from tkinter import TclError, Tk
 from unittest import mock
 
+from PIL import Image
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import gui
+import grouping
 
 
 # Chemin de dossier "realiste mais long" : une arborescence OneDrive tout a
@@ -123,6 +127,145 @@ class TestFolderLabelDoesNotHideActionButtons(unittest.TestCase):
         self.root.update_idletasks()
         self.root.update()
         self.assertEqual(app.folder_label_var.get(), short_path)
+
+
+class TestConfidenceIndicatorInUI(unittest.TestCase):
+    """Verrouille A2 (audit du 2026-07-22) : avant ce correctif, ni le
+    Treeview des groupes ni les cartes-vignettes n'affichaient jamais le
+    moindre signal de similarite/distance - impossible de distinguer un
+    vrai quasi-doublon d'un faux positif sans comparer visuellement chaque
+    carte. Insere des lignes directement en base (hachages CONTROLES, pas
+    calcules depuis de vraies photos) pour obtenir des distances de Hamming
+    predictibles, avec de vrais petits fichiers image pour que les
+    vignettes des cartes se generent normalement."""
+
+    def setUp(self):
+        try:
+            self.root = Tk()
+        except TclError as exc:
+            self.skipTest(f"Pas d'affichage disponible pour un test Tk reel : {exc}")
+        self.tmp_dir = Path(tempfile.mkdtemp())
+        self._apps = []
+
+    def tearDown(self):
+        for app in self._apps:
+            try:
+                app.db.close()
+            except Exception:
+                pass
+        try:
+            self.root.destroy()
+        except TclError:
+            pass
+
+    def _make_app(self) -> "gui.PhotoTriApp":
+        with mock.patch.object(gui, "_data_dir", return_value=self.tmp_dir), \
+             mock.patch.object(gui.update_checker, "start_update_check"):
+            app = gui.PhotoTriApp(self.root)
+        self._apps.append(app)
+        return app
+
+    def _make_image_file(self, name: str, color=(120, 120, 120)) -> Path:
+        path = self.tmp_dir / name
+        Image.new("RGB", (32, 32), color).save(path)
+        return path
+
+    def _wait_grouping_idle(self, app, timeout=10):
+        deadline = time.monotonic() + timeout
+        while app._grouping_in_progress:
+            self.root.update()
+            time.sleep(0.01)
+            self.assertLess(time.monotonic(), deadline, "le calcul de groupes ne se termine jamais")
+        self.root.update()
+
+    def test_near_group_shows_similarity_percentage_and_label_in_treeview(self):
+        app = self._make_app()
+        base = int("10" * 32, 2)  # hash equilibre (pas a faible entropie)
+        close = base ^ 0b11  # distance de Hamming 2
+        p1 = self._make_image_file("a.jpg")
+        p2 = self._make_image_file("b.jpg")
+        app.db.upsert_photo(str(p1), 1000, 1.0, 800, 600, "sha-a", base, None)
+        app.db.upsert_photo(str(p2), 1000, 1.0, 800, 600, "sha-b", close, None)
+
+        app._refresh_groups()
+        self._wait_grouping_idle(app)
+
+        self.assertEqual(len(app._groups), 1)
+        group = app._groups[0]
+        self.assertEqual(group.kind, "near")
+        self.assertEqual(group.max_distance, 2)
+
+        iid = next(iter(app._groups_by_iid))
+        values = app.groups_tree.item(iid, "values")
+        confidence_text = values[3]
+        expected_pct = grouping.similarity_percent(2)
+        self.assertIn(f"{expected_pct}%", confidence_text)
+        self.assertIn("Tres proches", confidence_text)
+
+    def test_exact_group_shows_100_percent_identical(self):
+        app = self._make_app()
+        p1 = self._make_image_file("dup1.jpg")
+        p2 = self._make_image_file("dup2.jpg")
+        app.db.upsert_photo(str(p1), 1000, 1.0, 800, 600, "sha-same", 0, None)
+        app.db.upsert_photo(str(p2), 1000, 1.0, 800, 600, "sha-same", 0, None)
+
+        app._refresh_groups()
+        self._wait_grouping_idle(app)
+
+        self.assertEqual(app._groups[0].kind, "exact")
+        iid = next(iter(app._groups_by_iid))
+        values = app.groups_tree.item(iid, "values")
+        self.assertEqual(values[3], "100% - Identique")
+
+    def test_card_shows_distance_relative_to_keeper(self):
+        app = self._make_app()
+        base = int("10" * 32, 2)
+        close = base ^ 0b11  # distance 2
+        p_keeper = self._make_image_file("keeper.jpg")
+        p_other = self._make_image_file("other.jpg")
+        # La photo de plus grande resolution est suggeree comme keeper
+        # (voir grouping.suggest_keeper).
+        app.db.upsert_photo(str(p_keeper), 1000, 1.0, 4000, 3000, "sha-a", base, None)
+        app.db.upsert_photo(str(p_other), 1000, 1.0, 800, 600, "sha-b", close, None)
+
+        app._refresh_groups()
+        self._wait_grouping_idle(app)
+
+        iid = next(iter(app._groups_by_iid))
+        app.groups_tree.selection_set(iid)
+        app._on_group_select()
+        self.root.update()
+
+        card_texts = []
+        for card in app.cards_inner.winfo_children():
+            texts = [child["text"] for child in card.winfo_children() if "text" in child.keys()]
+            card_texts.append(" | ".join(texts))
+        joined = "\n".join(card_texts)
+        self.assertIn("Distance : 2/6", joined)
+        self.assertIn("★ Suggeree a garder", joined)
+
+    def test_exact_group_card_shows_copie_exacte_instead_of_distance(self):
+        app = self._make_app()
+        p1 = self._make_image_file("dup1.jpg")
+        p2 = self._make_image_file("dup2.jpg")
+        app.db.upsert_photo(str(p1), 1000, 1.0, 800, 600, "sha-same", 0, None)
+        app.db.upsert_photo(str(p2), 1000, 1.0, 800, 600, "sha-same", 0, None)
+
+        app._refresh_groups()
+        self._wait_grouping_idle(app)
+
+        iid = next(iter(app._groups_by_iid))
+        app.groups_tree.selection_set(iid)
+        app._on_group_select()
+        self.root.update()
+
+        card_texts = []
+        for card in app.cards_inner.winfo_children():
+            texts = [child["text"] for child in card.winfo_children() if "text" in child.keys()]
+            card_texts.append(" | ".join(texts))
+        joined = "\n".join(card_texts)
+        self.assertIn("Copie exacte", joined)
+        self.assertNotIn("Distance :", joined)
 
 
 if __name__ == "__main__":

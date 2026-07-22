@@ -37,7 +37,7 @@ import grouping
 import hashing
 import scanner
 import update_checker
-from db import Database
+from db import Database, phash_from_sqlite
 
 APP_TITLE = "PhotoTri"
 DONATE_URL = "https://ko-fi.com/yoshines62000"
@@ -159,6 +159,11 @@ class PhotoTriApp:
         self._grouping_thread = None
         self._grouping_queue: "queue.Queue" = queue.Queue()
         self._pending_status_prefix = None
+        # Seuil utilise pour le DERNIER calcul de groupes termine - voir
+        # _refresh_groups. Initialise a la valeur par defaut pour que
+        # l'indicateur de confiance (A2) ait toujours une valeur coherente
+        # meme avant le tout premier calcul.
+        self._last_threshold = grouping.DEFAULT_NEAR_DUPLICATE_THRESHOLD
 
         self._build_layout()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -235,9 +240,17 @@ class PhotoTriApp:
 
         left = ttk.Frame(body)
         body.add(left, weight=1)
-        columns = ("kind", "count", "size")
+        # Colonne "Confiance" ajoutee (A2 de l'audit) : avant ce correctif,
+        # rien dans l'UI ne permettait de distinguer un vrai quasi-doublon
+        # d'un faux positif du dHash (voir A1) sans comparer visuellement
+        # chaque carte - un gros groupe heterogene (ex. 25 photos sans
+        # rapport, cas mesure a l'audit) ne portait aucune indication.
+        columns = ("kind", "count", "size", "confidence")
         self.groups_tree = ttk.Treeview(left, columns=columns, show="headings", height=20)
-        for col, label, width in [("kind", "Type", 90), ("count", "Photos", 60), ("size", "Poids total", 100)]:
+        for col, label, width in [
+            ("kind", "Type", 90), ("count", "Photos", 60), ("size", "Poids total", 100),
+            ("confidence", "Confiance", 130),
+        ]:
             self.groups_tree.heading(col, text=label)
             self.groups_tree.column(col, width=width, anchor="w")
         self.groups_tree.pack(side=LEFT, fill=BOTH, expand=True)
@@ -550,14 +563,32 @@ class PhotoTriApp:
             return
         photos = list(self.db.list_active_photos())
         threshold = self._get_threshold()
+        # Memorise le seuil reellement utilise pour CE calcul - relu par
+        # _apply_groups/_build_photo_card pour l'indicateur de confiance
+        # (A2) : l'utilisateur peut modifier le Spinbox entre le lancement
+        # du calcul et l'affichage du resultat, le libelle affiche doit
+        # rester coherent avec le regroupement effectivement obtenu plutot
+        # que de relire threshold_var a un moment quelconque plus tard.
+        self._last_threshold = threshold
         self._grouping_in_progress = True
         self.scan_button.configure(state="disabled")
         self._set_scan_controls_state("disabled")
+        # Mode indetermine pendant la preparation des candidats (indexage
+        # LSH, pas de granularite avant la boucle de verification des
+        # paires) ; _poll_grouping_queue bascule en mode determine des la
+        # premiere progression recue - meme logique que _start_scan, voir
+        # B1 de l'audit : avant ce correctif, aucun retour de progression
+        # n'etait jamais offert ici, seulement ce texte statique.
+        self.progress_bar.configure(mode="indeterminate")
+        self.progress_bar.start(10)
         self.status_var.set("Calcul des groupes...")
 
+        def on_progress(done, total):
+            self._grouping_queue.put(("progress", done, total))
+
         def worker():
-            groups = grouping.group_photos(photos, near_duplicate_threshold=threshold)
-            self._grouping_queue.put(groups)
+            groups = grouping.group_photos(photos, near_duplicate_threshold=threshold, progress_callback=on_progress)
+            self._grouping_queue.put(("done", groups))
 
         thread = threading.Thread(target=worker, daemon=True)
         self._grouping_thread = thread
@@ -566,14 +597,44 @@ class PhotoTriApp:
 
     def _poll_grouping_queue(self):
         try:
-            groups = self._grouping_queue.get_nowait()
+            while True:
+                kind, *rest = self._grouping_queue.get_nowait()
+                if kind == "progress":
+                    done, total = rest
+                    if str(self.progress_bar["mode"]) == "indeterminate":
+                        self.progress_bar.stop()
+                        self.progress_bar.configure(mode="determinate")
+                    self.progress_bar.configure(value=done, maximum=max(total, 1))
+                    self.status_var.set(f"Calcul des groupes... {done} / {total}")
+                elif kind == "done":
+                    groups = rest[0]
+                    self._grouping_in_progress = False
+                    self.scan_button.configure(state="normal")
+                    self._set_scan_controls_state("normal")
+                    if str(self.progress_bar["mode"]) == "indeterminate":
+                        self.progress_bar.stop()
+                        self.progress_bar.configure(mode="determinate")
+                    self._apply_groups(groups)
+                    return
         except queue.Empty:
+            pass
+        if self._grouping_in_progress:
             self.root.after(50, self._poll_grouping_queue)
-            return
-        self._grouping_in_progress = False
-        self.scan_button.configure(state="normal")
-        self._set_scan_controls_state("normal")
-        self._apply_groups(groups)
+
+    def _confidence_text(self, group) -> str:
+        """Libelle de la colonne "Confiance" (A2 de l'audit) : un groupe
+        "exact" est par construction une copie bit a bit (sha256 identique),
+        donc toujours 100% ; un groupe "near" affiche le pourcentage de
+        similarite (grouping.similarity_percent) et le libelle qualitatif
+        (grouping.confidence_label) derives de la distance de Hamming
+        maximale entre deux de ses membres (group.max_distance) - le
+        "maillon le plus faible" du groupe, celui qui merite le plus de
+        vigilance de la part de l'utilisateur avant un deplacement en
+        masse."""
+        if group.kind == "exact":
+            return "100% - Identique"
+        pct = grouping.similarity_percent(group.max_distance)
+        return f"{pct}% - {grouping.confidence_label(group.max_distance, self._last_threshold)}"
 
     def _apply_groups(self, groups: list) -> None:
         self._groups = groups
@@ -595,7 +656,10 @@ class PhotoTriApp:
                 (photos_by_id[pid]["size"] or 0) for pid in group.photo_ids if pid in photos_by_id
             )
             label = "Exact" if group.kind == "exact" else "Quasi-doublon"
-            self.groups_tree.insert("", END, iid=iid, values=(label, len(group.photo_ids), _format_size(total_size)))
+            self.groups_tree.insert(
+                "", END, iid=iid,
+                values=(label, len(group.photo_ids), _format_size(total_size), self._confidence_text(group)),
+            )
 
         self._show_group_detail(None)
         if not self._groups:
@@ -643,11 +707,15 @@ class PhotoTriApp:
             ).grid(row=0, column=0, padx=15, pady=15)
             return
         keeper_id = grouping.suggest_keeper(photos)
+        keeper_phash = phash_from_sqlite(next(p["phash"] for p in photos if p["id"] == keeper_id))
 
         for column, photo in enumerate(photos):
-            self._build_photo_card(self.cards_inner, column, photo, is_keeper=(photo["id"] == keeper_id))
+            self._build_photo_card(
+                self.cards_inner, column, photo, is_keeper=(photo["id"] == keeper_id),
+                group_kind=group.kind, keeper_phash=keeper_phash,
+            )
 
-    def _build_photo_card(self, parent, column, photo, is_keeper: bool):
+    def _build_photo_card(self, parent, column, photo, is_keeper: bool, group_kind: str, keeper_phash: int):
         card = ttk.Frame(parent, relief="groove", borderwidth=1, padding=6)
         card.grid(row=0, column=column, padx=6, pady=6, sticky="n")
 
@@ -673,6 +741,18 @@ class PhotoTriApp:
         dims = f"{photo['width'] or '?'} x {photo['height'] or '?'}" if photo["width"] else "Dimensions inconnues"
         ttk.Label(card, text=f"{dims} - {_format_size(photo['size'])}", foreground="#666").pack()
         ttk.Label(card, text=photo["taken_at"][:10] if photo["taken_at"] else "Date inconnue", foreground="#666").pack()
+
+        # Distance par rapport a la photo suggeree gardee (A2 de l'audit) :
+        # avant ce correctif, rien sur une carte ne permettait de savoir a
+        # quel point elle ressemblait vraiment aux autres membres du groupe.
+        # Un groupe "exact" est une copie bit a bit (sha256 identique) - la
+        # notion de distance de Hamming n'y a pas la meme portee qu'un
+        # quasi-doublon, on l'annonce donc differemment.
+        if group_kind == "exact":
+            ttk.Label(card, text="Copie exacte (fichier identique)", foreground="#666").pack()
+        else:
+            distance = hashing.hamming_distance(phash_from_sqlite(photo["phash"]), keeper_phash)
+            ttk.Label(card, text=f"Distance : {distance}/{self._last_threshold}", foreground="#666").pack()
 
         if is_keeper:
             ttk.Label(card, text="★ Suggeree a garder", foreground="#1B7A1B", font=BODY_FONT).pack(pady=(2, 0))

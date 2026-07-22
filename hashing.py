@@ -125,5 +125,78 @@ def hamming_distance(a: int, b: int) -> int:
     return (a ^ b).bit_count()
 
 
+# Marge (en nombre de bits) en-deca de laquelle un hash est considere a
+# "faible entropie" - voir is_low_entropy_hash ci-dessous. 4 bits sur 64
+# reste tres strict (une vraie photo texturee a normalement un nombre de
+# bits a 1 proche de 32, pas de 0/64), tout en couvrant confortablement le
+# cas mesure a l'audit (images uniformes -> hash exactement 0, popcount=0).
+LOW_ENTROPY_MARGIN_BITS = 4
+
+
+def is_low_entropy_hash(value: int, hash_size: int = HASH_SIZE, margin: int = LOW_ENTROPY_MARGIN_BITS) -> bool:
+    """Signale un dHash a tres faible entropie : nombre de bits a 1 proche
+    de 0 ou du maximum (hash_size*hash_size). Un tel hash provient presque
+    toujours d'une image a variance locale quasi nulle (ciel uni, mur,
+    neige, photo tres sur/sous-exposee) - le dHash n'encode QUE des
+    comparaisons de luminosite entre pixels adjacents, donc de telles images
+    produisent (quasiment) toujours le meme hash quelle que soit leur
+    couleur/teinte reelle (bug trouve a l'audit, A1 : rouge, bleu, vert,
+    noir, blanc uniformes produisent tous exactement le meme hash - distance
+    de Hamming 0 entre eux, quel que soit le seuil de sensibilite configure).
+    Utilise par grouping.py pour savoir quand une verification
+    supplementaire (compute_color_signature) est necessaire avant de
+    rapprocher deux photos : appliquer cette verification a CHAQUE paire
+    serait inutilement couteux (elle rouvre les fichiers), alors qu'elle
+    n'est utile que pour ce cas pathologique precis."""
+    total_bits = hash_size * hash_size
+    popcount = value.bit_count()
+    return popcount <= margin or popcount >= (total_bits - margin)
+
+
+def compute_color_signature(image: Image.Image, size: int = 12) -> tuple:
+    """Signal complementaire au dHash, PAS invariant a la luminosite relative
+    (contrairement au dHash) : capture la couleur moyenne (R, G, B) sur
+    chacun des trois tiers horizontaux de l'image, redimensionnee a
+    `size` x `size` pour rester tres bon marche. Sert uniquement a departager
+    les faux positifs de bas niveau du dHash decrits dans A1 (audit du
+    2026-07-22) : deux images uniformes de teintes totalement differentes
+    (rouge/bleu/vert/noir/blanc...) ont le meme dHash (0) mais des couleurs
+    moyennes tres eloignees - voir color_signature_distance. N'est PAS un
+    hachage perceptuel general (aucune invariance a la luminosite/au
+    contraste), delibererement : ce n'est qu'un signal d'appoint local a
+    grouping.py, jamais utilise seul."""
+    small = image.convert("RGB").resize((size, size), Image.BILINEAR)
+    pixels = list(small.getdata())
+    third = max(size // 3, 1)
+    bands = []
+    for band_index in range(3):
+        row_start = band_index * third
+        row_end = size if band_index == 2 else row_start + third
+        band_pixels = pixels[row_start * size: row_end * size] or pixels
+        r = sum(p[0] for p in band_pixels) // len(band_pixels)
+        g = sum(p[1] for p in band_pixels) // len(band_pixels)
+        b = sum(p[2] for p in band_pixels) // len(band_pixels)
+        bands.extend((r, g, b))
+    return tuple(bands)
+
+
+def compute_color_signature_from_path(path: Path, size: int = 12) -> tuple:
+    """Equivalent de compute_dhash_from_path pour compute_color_signature :
+    memes garanties (formats restreints via ALLOWED_PILLOW_FORMATS, capture
+    large des erreurs de decodage converties en UnreadableImageError)."""
+    try:
+        with Image.open(path, formats=ALLOWED_PILLOW_FORMATS) as img:
+            return compute_color_signature(img, size=size)
+    except Exception as exc:
+        raise UnreadableImageError(f"Image illisible : {path} ({type(exc).__name__}: {exc})") from exc
+
+
+def color_signature_distance(a: tuple, b: tuple) -> int:
+    """Distance simple (somme des ecarts absolus canal par canal) entre deux
+    signatures de compute_color_signature. 0 = couleurs moyennes identiques
+    sur les trois tiers ; maximum possible 9*255=2295 (3 tiers x 3 canaux)."""
+    return sum(abs(x - y) for x, y in zip(a, b))
+
+
 def is_image_file(path: Path) -> bool:
     return path.suffix.lower() in IMAGE_EXTENSIONS
