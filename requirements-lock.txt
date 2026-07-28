@@ -1,0 +1,36 @@
+# Fichier de verrouillage pour un build de release REPRODUCTIBLE
+# (trouvaille d'audit du 2026-07-28, F5 - meme constat et meme remede que
+# Coffre, voir son propre requirements-lock.txt) - complement de
+# requirements.txt (qui garde volontairement une plage ouverte ">=" pour
+# les contributeurs qui lancent PhotoTri depuis le code source), PAS un
+# remplacement.
+#
+# requirements.txt seul ne garantit rien : deux builds de dist/PhotoTri.exe
+# a des dates differentes peuvent embarquer des versions differentes de
+# Pillow/pillow-heif (et de leur propre chaine de dependances) sans que
+# cela soit trace nulle part.
+#
+# Versions ci-dessous : PAS extraites d'un environnement de build DEDIE a
+# PhotoTri - aucun n'existe sur cette machine au moment de ce correctif.
+# Seul un interpreteur Python partage entre plusieurs projets etait
+# disponible (`pip show Pillow` -> 12.2.0), et sa version de Pillow est
+# elle-meme SOUS le plancher de securite deja impose par requirements.txt
+# (Pillow>=12.3.0, voir son propre commentaire pour le detail des CVE
+# couvertes) - il ne pouvait donc pas non plus servir de reference fiable
+# ici. Les versions ci-dessous sont a la place figees au plancher
+# actuellement declare dans requirements.txt, seule source de versions
+# volontairement validees disponible pour l'instant.
+#
+# A REGENERER et committer AVANT chaque nouvelle release, depuis un vrai
+# environnement de build DEDIE a PhotoTri (venv propre au projet) des
+# qu'il en existera un :
+#
+#   python -m pip install --upgrade -r requirements.txt
+#   python -m pip freeze | findstr /i "pillow" > requirements-lock.txt
+#
+# Pour un build reproductible a partir de ce fichier :
+#
+#   python -m pip install -r requirements-lock.txt
+#   python -m PyInstaller PhotoTri.spec
+Pillow==12.3.0
+pillow-heif==0.15

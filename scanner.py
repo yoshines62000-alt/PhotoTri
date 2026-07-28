@@ -178,7 +178,7 @@ def scan_folder(
 
             try:
                 sha = hashing.file_sha256(path)
-                with Image.open(hashing.long_path(path), formats=hashing.ALLOWED_PILLOW_FORMATS) as img:
+                with hashing.open_image(path) as img:
                     width, height = img.size
                     taken_at = _extract_taken_at(img)
                     phash = hashing.compute_dhash(img)

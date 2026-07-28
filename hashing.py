@@ -108,6 +108,29 @@ def long_path(path) -> str:
     return "\\\\?\\" + text
 
 
+def open_image(path) -> Image.Image:
+    """Ouvre `path` comme image Pillow avec les deux garanties deja
+    systematiquement appliquees a chaque site d'ouverture du projet :
+    `long_path()` (M1, support des chemins > MAX_PATH sous Windows) et
+    `formats=ALLOWED_PILLOW_FORMATS` (restriction anti-format-deguise, voir
+    plus haut). Factorise depuis 4 emplacements qui dupliquaient
+    exactement ce meme motif `Image.open(long_path(...), formats=...)`
+    (trouvaille d'audit du 2026-07-28, F4) : compute_dhash_from_path et
+    compute_color_signature_from_path ci-dessous, plus scanner.py et
+    gui.py (import hashing.open_image dans les deux cas).
+
+    Renvoie directement l'objet Image (comme Image.open() elle-meme) : ne
+    change donc RIEN au comportement d'aucun appelant existant - reste
+    utilisable comme gestionnaire de contexte (`with open_image(path) as
+    img:`) exactement comme avant puisque c'est le meme objet Image, qui
+    implemente deja __enter__/__exit__, qui est renvoye ; aucune exception
+    n'est interceptee ici, chaque appelant garde sa propre gestion
+    d'erreur ; et aucune conversion de mode couleur n'est faite ici non
+    plus (`.convert("L")`/`.convert("RGB")` restent du ressort de chaque
+    appelant, inchanges)."""
+    return Image.open(long_path(path), formats=ALLOWED_PILLOW_FORMATS)
+
+
 def file_sha256(path: Path, chunk_size: int = 1 << 20) -> str:
     """Empreinte du contenu OCTET PAR OCTET du fichier. Deux fichiers avec
     ce meme hash sont des doublons exacts au sens strict (copie bit a bit,
@@ -174,7 +197,7 @@ def compute_dhash_from_path(path: Path, hash_size: int = HASH_SIZE) -> int:
     fichier dont le chemin complet depasse MAX_PATH quand Windows le
     permet, au lieu de se contenter de l'echec gracieux deja en place."""
     try:
-        with Image.open(long_path(path), formats=ALLOWED_PILLOW_FORMATS) as img:
+        with open_image(path) as img:
             return compute_dhash(img, hash_size=hash_size)
     except Exception as exc:
         raise UnreadableImageError(f"Image illisible : {path} ({type(exc).__name__}: {exc})") from exc
@@ -251,7 +274,7 @@ def compute_color_signature_from_path(path: Path, size: int = 12) -> tuple:
     large des erreurs de decodage converties en UnreadableImageError,
     prefixe long_path (M1) applique de la meme facon)."""
     try:
-        with Image.open(long_path(path), formats=ALLOWED_PILLOW_FORMATS) as img:
+        with open_image(path) as img:
             return compute_color_signature(img, size=size)
     except Exception as exc:
         raise UnreadableImageError(f"Image illisible : {path} ({type(exc).__name__}: {exc})") from exc

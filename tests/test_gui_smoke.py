@@ -118,11 +118,15 @@ class GuiSmokeTestCase(unittest.TestCase):
             pass
 
     def _wait_idle(self, timeout=15):
-        """Le scan ET le regroupement tournent chacun sur leur propre
-        thread - attendre les deux drapeaux plutot qu'un seul evite une
-        course ou le test lirait un etat intermediaire."""
+        """Le scan, le regroupement ET le deplacement (voir
+        _move_checked_photos, threade depuis le correctif de l'audit du
+        2026-07-28 - meme pattern que _scan_worker) tournent chacun sur leur
+        propre thread - attendre les trois drapeaux plutot qu'un seul evite
+        une course ou le test lirait un etat intermediaire (ex. fichier pas
+        encore effectivement deplace sur le disque au moment des
+        assertions)."""
         deadline = time.monotonic() + timeout
-        while self.app._scanning or self.app._grouping_in_progress:
+        while self.app._scanning or self.app._grouping_in_progress or self.app._moving:
             self.root.update()
             time.sleep(0.02)
             self.assertLess(time.monotonic(), deadline, "l'app ne redevient jamais idle (timeout)")

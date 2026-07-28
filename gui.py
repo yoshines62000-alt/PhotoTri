@@ -31,7 +31,7 @@ from tkinter import (
 )
 from tkinter import font as tkfont
 
-from PIL import Image, ImageTk
+from PIL import ImageTk
 
 import grouping
 import hashing
@@ -46,6 +46,23 @@ UPDATE_REPO = "yoshines62000-alt/PhotoTri"
 RELEASES_URL = f"https://github.com/{UPDATE_REPO}/releases/latest"
 THUMBNAIL_SIZE = (150, 150)
 BODY_FONT = ("Segoe UI", 10)
+
+# Nombre de cartes (vignettes) construites d'un coup pour un groupe (M1 de
+# l'audit du 2026-07-28) : avant ce correctif, _show_group_detail
+# construisait TOUTES les cartes d'un groupe en une seule passe synchrone
+# sur le thread principal (decodage Pillow + redimensionnement de chaque
+# vignette compris), sans aucune limite - un groupe de plusieurs centaines
+# de quasi-doublons (rafale photo/video tres longue) gelait donc l'interface
+# le temps de tout decoder. Plutot que de deplacer le decodage sur un thread
+# dedie (ImageTk.PhotoImage doit de toute facon etre cree sur le thread Tk,
+# ce qui aurait quand meme impose de reconstruire les widgets par lots via
+# une file, pour un gain limite sur les groupes usuels), la pagination borne
+# directement le travail synchrone d'un seul affichage a un nombre constant
+# de vignettes, quelle que soit la taille reelle du groupe - plus simple a
+# integrer proprement ici, avec un bouton "Afficher plus" (voir
+# _show_group_detail/_show_more_detail_thumbnails) pour charger la suite par
+# lots du meme calibre a la demande.
+DETAIL_THUMBNAILS_PAGE_SIZE = 20
 
 # Gris utilise pour tout le texte "secondaire" (taille/dimensions/date sur
 # les cartes, barre de statut, numero de version...) - #595959 plutot que le
@@ -230,13 +247,20 @@ class PhotoTriApp:
         self._groups: list = []
         self._groups_by_iid: dict = {}
         self._selected_group = None
+        # Nombre de cartes actuellement affichees pour le groupe selectionne
+        # (voir DETAIL_THUMBNAILS_PAGE_SIZE/_show_group_detail) - reinitialise
+        # a DETAIL_THUMBNAILS_PAGE_SIZE des qu'un groupe DIFFERENT est
+        # selectionne, mais conserve/augmente quand "Afficher plus" est
+        # cliquee sur le meme groupe.
+        self._detail_visible_count = DETAIL_THUMBNAILS_PAGE_SIZE
         self._thumbnail_refs: list = []
         self._checkbox_vars: dict = {}
         # Widgets etoiles de notation (J1) indexes par id de photo, pour que
         # les clics ("<Button-1>") et un rafraichissement ulterieur puissent
         # retrouver les 5 Label d'une carte sans reparcourir tout le canvas.
         self._rating_star_labels: dict = {}
-        # Identifiants Tcl des gestionnaires de clic lies aux etoiles
+        # Identifiants Tcl des gestionnaires (clic ET clavier - voir M2 de
+        # l'audit du 2026-07-28 dans _build_rating_stars) lies aux etoiles
         # actuellement affichees (voir _build_rating_stars/_show_group_detail) -
         # necessaires pour les liberer explicitement (Widget.destroy() ne le
         # fait PAS automatiquement : une commande enregistree via .bind()
@@ -255,6 +279,15 @@ class PhotoTriApp:
         self._grouping_thread = None
         self._grouping_queue: "queue.Queue" = queue.Queue()
         self._pending_status_prefix = None
+        # Deplacement des photos cochees (voir _move_checked_photos) : meme
+        # pattern thread + Queue + root.after que le scan (_scan_worker) et
+        # le regroupement (_refresh_groups) - bug trouve a l'audit : cette
+        # operation tournait auparavant entierement en synchrone sur le
+        # thread principal Tkinter, gelant l'interface pendant tout le
+        # deplacement d'un gros lot de photos.
+        self._moving = False
+        self._move_thread = None
+        self._move_queue: "queue.Queue" = queue.Queue()
         # Seuil utilise pour le DERNIER calcul de groupes termine - voir
         # _refresh_groups. Initialise a la valeur par defaut pour que
         # l'indicateur de confiance (A2) ait toujours une valeur coherente
@@ -692,6 +725,19 @@ class PhotoTriApp:
         # rester coherent avec le regroupement effectivement obtenu plutot
         # que de relire threshold_var a un moment quelconque plus tard.
         self._last_threshold = threshold
+        # Nombre de bandes de l'indexage LSH (voir grouping.py) transmis a
+        # group_photos, ajuste pour rester STRICTEMENT superieur au seuil
+        # choisi - c'est exactement la condition (near_duplicate_threshold <
+        # bands) que group_photos verifie pour emprunter son chemin rapide.
+        # Bug trouve a l'audit : le Spinbox de sensibilite autorise 0-20
+        # (voir threshold_spinbox) mais `bands` restait fige a
+        # grouping.DEFAULT_BANDS (8), jamais transmis depuis l'UI - tout
+        # seuil >= 8 retombait donc silencieusement sur la comparaison
+        # exhaustive O(n^2) (lente sur une grosse bibliotheque), sans le
+        # moindre avertissement ni le moindre effet reel de la valeur
+        # choisie au-dela de 7. DEFAULT_BANDS reste le plancher ici pour ne
+        # rien changer au comportement deja eprouve des seuils 0-7.
+        bands = max(grouping.DEFAULT_BANDS, threshold + 1)
         self._grouping_in_progress = True
         self.scan_button.configure(state="disabled")
         self._set_scan_controls_state("disabled")
@@ -709,7 +755,9 @@ class PhotoTriApp:
             self._grouping_queue.put(("progress", done, total))
 
         def worker():
-            groups = grouping.group_photos(photos, near_duplicate_threshold=threshold, progress_callback=on_progress)
+            groups = grouping.group_photos(
+                photos, near_duplicate_threshold=threshold, bands=bands, progress_callback=on_progress,
+            )
             self._grouping_queue.put(("done", groups))
 
         thread = threading.Thread(target=worker, daemon=True)
@@ -807,6 +855,14 @@ class PhotoTriApp:
         self._show_group_detail(group)
 
     def _show_group_detail(self, group):
+        # Reinitialise la pagination (M1 de l'audit du 2026-07-28, voir
+        # DETAIL_THUMBNAILS_PAGE_SIZE) UNIQUEMENT quand le groupe affiche
+        # change reellement - _show_more_detail_thumbnails() rappelle cette
+        # meme methode avec le MEME objet groupe (comparaison par identite)
+        # apres avoir augmente _detail_visible_count, ce qui ne doit surtout
+        # pas se faire ecraser ici a chaque clic sur "Afficher plus".
+        if group is not self._selected_group:
+            self._detail_visible_count = DETAIL_THUMBNAILS_PAGE_SIZE
         self._selected_group = group
         self._thumbnail_refs = []
         self._checkbox_vars = {}
@@ -847,11 +903,41 @@ class PhotoTriApp:
         keeper_id = grouping.suggest_keeper(photos)
         keeper_phash = phash_from_sqlite(next(p["phash"] for p in photos if p["id"] == keeper_id))
 
-        for column, photo in enumerate(photos):
+        # Pagination (M1 de l'audit du 2026-07-28) : seules les
+        # `_detail_visible_count` premieres photos du groupe sont
+        # effectivement construites en cartes ici, ce qui borne le travail
+        # synchrone (decodage Pillow + redimensionnement compris, voir
+        # _build_photo_card) a un nombre constant quelle que soit la taille
+        # reelle du groupe - voir DETAIL_THUMBNAILS_PAGE_SIZE pour le detail
+        # du choix (pagination plutot que thread dedie).
+        visible_count = min(self._detail_visible_count, len(photos))
+        for column, photo in enumerate(photos[:visible_count]):
             self._build_photo_card(
                 self.cards_inner, column, photo, is_keeper=(photo["id"] == keeper_id),
                 group_kind=group.kind, keeper_phash=keeper_phash,
             )
+
+        remaining = len(photos) - visible_count
+        if remaining > 0:
+            more_button = ttk.Button(
+                self.cards_inner,
+                text=f"Afficher {min(DETAIL_THUMBNAILS_PAGE_SIZE, remaining)} de plus... ({remaining} restante(s))",
+                command=self._show_more_detail_thumbnails,
+            )
+            more_button.grid(row=0, column=visible_count, padx=6, pady=6, sticky="n")
+
+    def _show_more_detail_thumbnails(self) -> None:
+        """Gestionnaire du bouton "Afficher plus" (M1 de l'audit du
+        2026-07-28, voir DETAIL_THUMBNAILS_PAGE_SIZE) : agrandit la
+        pagination d'un lot supplementaire puis reconstruit l'affichage du
+        groupe courant - simple reappel de _show_group_detail avec le MEME
+        objet groupe (voir sa garde sur `is not` en tete de methode), qui ne
+        reinitialise donc pas _detail_visible_count qu'on vient juste
+        d'augmenter."""
+        if self._selected_group is None:
+            return
+        self._detail_visible_count += DETAIL_THUMBNAILS_PAGE_SIZE
+        self._show_group_detail(self._selected_group)
 
     def _build_photo_card(self, parent, column, photo, is_keeper: bool, group_kind: str, keeper_phash: int):
         card = ttk.Frame(parent, relief="groove", borderwidth=1, padding=6)
@@ -860,12 +946,13 @@ class PhotoTriApp:
         thumb_label = ttk.Label(card)
         thumb_label.pack()
         try:
-            # hashing.long_path() (M1) plutot que photo["path"] directement :
-            # permet d'afficher la vignette d'une photo dont le chemin
-            # complet depasse MAX_PATH quand Windows le permet, au lieu de
-            # se contenter de l'echec gracieux ("[image indisponible]")
+            # hashing.open_image() (M1, et F4 de l'audit du 2026-07-28 pour
+            # la factorisation elle-meme) plutot que Image.open(photo["path"])
+            # directement : permet d'afficher la vignette d'une photo dont le
+            # chemin complet depasse MAX_PATH quand Windows le permet, au
+            # lieu de se contenter de l'echec gracieux ("[image indisponible]")
             # deja en place ci-dessous.
-            with Image.open(hashing.long_path(photo["path"]), formats=hashing.ALLOWED_PILLOW_FORMATS) as img:
+            with hashing.open_image(photo["path"]) as img:
                 # draft() accelere nettement le decodage JPEG quand on ne
                 # veut qu'une vignette (no-op silencieux sur les formats non
                 # JPEG) - optimisation trouvee a l'audit, le decodage pleine
@@ -917,21 +1004,64 @@ class PhotoTriApp:
         carte photo (J1 de l'audit) - chaque etoile represente une note de
         1 a son rang ; cliquer sur l'etoile deja active en position `n`
         reinitialise la note a 0 (seul moyen d'annuler une notation, voir
-        _set_photo_rating)."""
+        _set_photo_rating).
+
+        Accessible au clavier (M2 de l'audit du 2026-07-28) : avant ce
+        correctif, les etoiles n'etaient ni focusables (`takefocus`
+        implicite a 0 sur un ttk.Label) ni reliees a aucun binding clavier -
+        seule la souris permettait de noter une photo, Tab sautait purement
+        et simplement par-dessus la rangee entiere. Chaque etoile est
+        desormais focusable (`takefocus=1`) et se comporte, une fois le
+        focus dessus, comme le bouton qu'elle represente deja visuellement :
+        Entree/Espace = meme action qu'un clic gauche, Gauche/Droite
+        deplacent le focus dans la rangee, et les chiffres 1-5 definissent
+        directement la note depuis n'importe quelle etoile focus de la
+        carte (sans avoir a naviguer jusqu'a la bonne position). Un contour
+        (FocusIn/FocusOut) rend en plus le focus clavier visible, absent par
+        defaut sur un ttk.Label."""
         stars_frame = ttk.Frame(parent)
         stars_frame.pack(pady=(4, 0))
         labels = []
         for value in range(1, RATING_MAX + 1):
-            star_label = ttk.Label(stars_frame, font=BODY_FONT, cursor="hand2")
+            star_label = ttk.Label(stars_frame, font=BODY_FONT, cursor="hand2", takefocus=1)
             star_label.pack(side=LEFT)
-            # funcid conserve (voir _rating_star_funcids) pour pouvoir
-            # liberer explicitement cette commande Tcl lorsque cette carte
-            # sera reconstruite/detruite - sans quoi la fermeture ci-dessous
-            # (qui referme sur `self`) resterait enregistree dans
-            # l'interpreteur au-dela de la duree de vie reelle de la carte.
-            funcid = star_label.bind("<Button-1>", lambda event, v=value: self._set_photo_rating(photo_id, v))
-            self._rating_star_funcids.append((star_label, funcid))
+            # funcid conserve pour chaque binding (voir _rating_star_funcids)
+            # pour pouvoir liberer explicitement ces commandes Tcl lorsque
+            # cette carte sera reconstruite/detruite - sans quoi les
+            # fermetures ci-dessous (qui referment sur `self`) resteraient
+            # enregistrees dans l'interpreteur au-dela de la duree de vie
+            # reelle de la carte.
+            for sequence, handler in (
+                ("<Button-1>", lambda event, v=value: self._set_photo_rating(photo_id, v)),
+                ("<Return>", lambda event, v=value: self._set_photo_rating(photo_id, v)),
+                ("<space>", lambda event, v=value: self._set_photo_rating(photo_id, v)),
+                # <Key> generique plutot que 5 bindings "1".."5" par etoile :
+                # Tk resout deja <Return>/<space> ci-dessus en priorite sur
+                # ce pattern plus generique pour les touches qu'ils couvrent,
+                # <Key> ne recoit donc que le reste (dont les chiffres).
+                # Deleguee a une methode nommee (_handle_rating_key_press)
+                # plutot que de rester une lambda inline : reste testable
+                # directement, independamment de la livraison reelle d'un
+                # evenement clavier synthetique par Tk (plus fragile a
+                # simuler de facon fiable dans les tests qui recreent de
+                # nombreuses racines Tk a la suite, voir tests/test_gui.py).
+                ("<Key>", lambda event, pid=photo_id: self._handle_rating_key_press(pid, event.char)),
+                ("<FocusIn>", lambda event, lbl=star_label: lbl.configure(relief="solid", borderwidth=1)),
+                ("<FocusOut>", lambda event, lbl=star_label: lbl.configure(relief="flat", borderwidth=0)),
+            ):
+                funcid = star_label.bind(sequence, handler)
+                self._rating_star_funcids.append((star_label, funcid))
             labels.append(star_label)
+        # Navigation Gauche/Droite entre les etoiles d'une meme carte -
+        # bindee dans une seconde passe (apres coup) puisqu'elle a besoin de
+        # la liste `labels` complete pour s'y deplacer. Deleguee a
+        # _focus_star (meme raison que _handle_rating_key_press ci-dessus :
+        # testable directement).
+        for position, star_label in enumerate(labels):
+            left_funcid = star_label.bind("<Left>", lambda event, i=position: self._focus_star(labels, i - 1))
+            right_funcid = star_label.bind("<Right>", lambda event, i=position: self._focus_star(labels, i + 1))
+            self._rating_star_funcids.append((star_label, left_funcid))
+            self._rating_star_funcids.append((star_label, right_funcid))
         self._rating_star_labels[photo_id] = labels
         self._refresh_rating_stars(photo_id, current_rating)
 
@@ -964,10 +1094,42 @@ class PhotoTriApp:
         self.db.set_rating(photo_id, new_rating)
         self._refresh_rating_stars(photo_id, new_rating)
 
+    def _handle_rating_key_press(self, photo_id: int, char: str) -> None:
+        """Gestionnaire du binding `<Key>` generique de chaque etoile (M2 de
+        l'audit du 2026-07-28, voir _build_rating_stars) : un chiffre 1-5
+        definit directement la note de `photo_id` a cette valeur (via
+        _set_photo_rating, meme toggle-a-0 si c'est deja la note courante),
+        n'importe quelle autre touche est ignoree silencieusement (les
+        touches deja couvertes par des bindings plus specifiques - Entree,
+        Espace, fleches - ne declenchent de toute facon jamais celui-ci,
+        voir le commentaire dans _build_rating_stars)."""
+        if char in "12345":
+            self._set_photo_rating(photo_id, int(char))
+
+    def _focus_star(self, labels: list, index: int) -> None:
+        """Deplace le focus clavier vers l'etoile a `index` dans `labels`
+        (M2 de l'audit du 2026-07-28, voir les bindings `<Left>`/`<Right>`
+        de _build_rating_stars), en le bornant aux limites de la rangee -
+        jamais d'IndexError sur la premiere/derniere etoile, le focus y
+        reste simplement plutot que de sortir de la rangee ou de sauter
+        ailleurs dans l'interface."""
+        clamped_index = max(0, min(len(labels) - 1, index))
+        labels[clamped_index].focus_set()
+
     # -- deplacement non destructif -------------------------------------------------
 
     def _move_checked_photos(self):
         if self._selected_group is None:
+            return
+        # Meme garde-fou que _refresh_groups : ne jamais lancer un
+        # deplacement pendant qu'un scan ou un regroupement ecrit deja sur
+        # sa propre connexion SQLite (voir docstring de module) - le bouton
+        # Deplacer est deja desactive dans ces deux cas via
+        # _set_scan_controls_state, mais cette garde protege aussi les
+        # appels directs (tests) qui contournent l'etat du bouton, et evite
+        # tout double-declenchement pendant qu'un deplacement precedent
+        # tourne encore.
+        if self._scanning or self._grouping_in_progress or self._moving:
             return
         checked_ids = [pid for pid, var in self._checkbox_vars.items() if var.get()]
         if not checked_ids:
@@ -1038,80 +1200,177 @@ class PhotoTriApp:
             ):
                 return
 
-        moved, failed, already_gone, orphan_copies = 0, [], 0, []
-        for photo_id in checked_ids:
-            row = self.db.get_photo(photo_id)
-            if row is None:
-                # Deja disparue de l'index (deplacee/supprimee hors de
-                # PhotoTri entre l'affichage du groupe et ce clic) - rien a
-                # deplacer, ce n'est pas un echec a proprement parler.
-                already_gone += 1
-                continue
-            source = Path(row["path"])
-            dest = _unique_destination(review_dir, source.name)
-            try:
-                shutil.move(str(source), str(dest))
-            except OSError as exc:
-                # Entre volumes differents, shutil.move ne peut pas se
-                # contenter d'un os.rename() atomique : il copie d'abord le
-                # fichier vers `dest` puis supprime la source. Si SEULE
-                # cette suppression finale echoue (source en lecture
-                # seule/permissions restreintes - assez courant avec des
-                # outils de synchronisation cloud ou des cartes SD
-                # protegees), une copie complete et valide existe deja dans
-                # le dossier de revision au moment ou cette exception est
-                # levee. Avant ce correctif, ce cas etait toujours rapporte
-                # comme un pur "Echec" - message trompeur, puisqu'une copie
-                # orpheline restait en realite sur le disque, jamais
-                # indexee (db.mark_moved jamais appele) et donc invisible a
-                # tout scan futur (le dossier de revision est exclu du
-                # scan) - bug trouve a l'audit (E4).
-                #
-                # On distingue ce cas (copie complete, seule la suppression
-                # a echoue) d'un veritable echec de copie (source toujours
-                # intacte car c'est precisement elle qui n'a pas pu etre
-                # supprimee) en comparant la taille du fichier copie a
-                # celle de la source.
-                try:
-                    copy_is_complete = (
-                        source.exists() and dest.exists()
-                        and dest.stat().st_size == source.stat().st_size
-                    )
-                except OSError:
-                    copy_is_complete = False
+        # -- deplacement effectif sur un thread dedie ------------------------------
+        # Bug trouve a l'audit : la boucle de shutil.move ci-dessous tournait
+        # auparavant entierement en synchrone sur le thread principal
+        # Tkinter (aucun thread, aucune barre de progression), contrairement
+        # au scan (deja threade, voir _scan_worker/_start_scan) - sur un
+        # gros lot de photos, ca gelait l'interface pendant tout le
+        # deplacement. Meme pattern ici : thread + queue.Queue + root.after
+        # pour le polling (_poll_move_queue), jamais de widget Tkinter
+        # touche depuis le thread (_move_worker) lui-meme - seul
+        # _poll_move_queue/_on_move_finished, sur le thread principal, le
+        # font. Les verifications ci-dessus (confirmation, dossier de
+        # revision, espace disque) restent volontairement sur le thread
+        # principal : ce sont de vraies boites de dialogue MODALES
+        # (messagebox), qui doivent rester sur le thread Tk.
+        self._moving = True
+        self.scan_button.configure(state="disabled")
+        self._set_scan_controls_state("disabled")
+        self.progress_bar.configure(mode="determinate", value=0, maximum=max(len(checked_ids), 1))
+        self.status_var.set(f"Deplacement en cours... 0 / {len(checked_ids)}")
 
-                if copy_is_complete:
-                    # Le fichier physique est bel et bien range dans le
-                    # dossier de revision : on le traite comme deplace pour
-                    # rester coherent avec la realite du disque (index a
-                    # jour, plus jamais reproposee comme active), et on
-                    # avertit separement que l'original n'a pas pu etre
-                    # supprime plutot que de pretendre qu'aucune action n'a
-                    # eu lieu.
-                    self.db.mark_moved(photo_id, str(dest))
-                    moved += 1
-                    # L'exception elle-meme est conservee (pas seulement son
-                    # texte) : elle est traduite en phrase francaise
-                    # generique au moment de construire le message final
-                    # (bug trouve a l'audit, C3), le detail technique brut
-                    # partant dans erreurs.log plutot que dans la boite de
-                    # dialogue.
-                    orphan_copies.append((source.name, exc))
-                    continue
+        def on_progress(done, total):
+            self._move_queue.put(("progress", done, total))
 
-                # Echec de copie proprement dit (pas seulement de la
-                # suppression) : on ne laisse pas trainer une copie
-                # partielle/corrompue non indexee dans le dossier de
-                # revision plutot que de revenir a un etat coherent.
-                if dest.exists():
+        thread = threading.Thread(
+            target=self._move_worker, args=(checked_ids, review_dir, on_progress), daemon=True,
+        )
+        self._move_thread = thread
+        thread.start()
+        self.root.after(100, self._poll_move_queue)
+
+    def _move_worker(self, checked_ids: list, review_dir: Path, on_progress) -> None:
+        """Deplacement effectif (shutil.move + mise a jour de l'index),
+        appele sur le thread cree par _move_checked_photos - jamais sur le
+        thread principal. Ouvre sa PROPRE connexion SQLite (`worker_db`)
+        plutot que de partager self.db : sqlite3 interdit de reutiliser une
+        connexion depuis un autre thread que celui qui l'a creee (meme
+        raison que _scan_worker, voir docstring de module)."""
+        worker_db = None
+        try:
+            worker_db = Database(self.db_path)
+            moved, failed, already_gone, orphan_copies = 0, [], 0, []
+            total = len(checked_ids)
+            for index, photo_id in enumerate(checked_ids, start=1):
+                row = worker_db.get_photo(photo_id)
+                if row is None:
+                    # Deja disparue de l'index (deplacee/supprimee hors de
+                    # PhotoTri entre l'affichage du groupe et ce clic) - rien
+                    # a deplacer, ce n'est pas un echec a proprement parler.
+                    already_gone += 1
+                else:
+                    source = Path(row["path"])
+                    dest = _unique_destination(review_dir, source.name)
                     try:
-                        dest.unlink()
-                    except OSError:
-                        pass
-                failed.append((source.name, exc))
-                continue
-            self.db.mark_moved(photo_id, str(dest))
-            moved += 1
+                        shutil.move(str(source), str(dest))
+                    except OSError as exc:
+                        # Entre volumes differents, shutil.move ne peut pas
+                        # se contenter d'un os.rename() atomique : il copie
+                        # d'abord le fichier vers `dest` puis supprime la
+                        # source. Si SEULE cette suppression finale echoue
+                        # (source en lecture seule/permissions restreintes -
+                        # assez courant avec des outils de synchronisation
+                        # cloud ou des cartes SD protegees), une copie
+                        # complete et valide existe deja dans le dossier de
+                        # revision au moment ou cette exception est levee.
+                        # Avant le correctif d'origine (E4), ce cas etait
+                        # toujours rapporte comme un pur "Echec" - message
+                        # trompeur, puisqu'une copie orpheline restait en
+                        # realite sur le disque, jamais indexee (mark_moved
+                        # jamais appele) et donc invisible a tout scan futur
+                        # (le dossier de revision est exclu du parcours).
+                        #
+                        # On distingue ce cas (copie complete, seule la
+                        # suppression a echoue) d'un veritable echec de
+                        # copie (source toujours intacte car c'est
+                        # precisement elle qui n'a pas pu etre supprimee) en
+                        # comparant la taille du fichier copie a celle de la
+                        # source.
+                        try:
+                            copy_is_complete = (
+                                source.exists() and dest.exists()
+                                and dest.stat().st_size == source.stat().st_size
+                            )
+                        except OSError:
+                            copy_is_complete = False
+
+                        if copy_is_complete:
+                            # Le fichier physique est bel et bien range dans
+                            # le dossier de revision : on le traite comme
+                            # deplace pour rester coherent avec la realite
+                            # du disque (index a jour, plus jamais
+                            # reproposee comme active), et on avertit
+                            # separement que l'original n'a pas pu etre
+                            # supprime plutot que de pretendre qu'aucune
+                            # action n'a eu lieu.
+                            worker_db.mark_moved(photo_id, str(dest))
+                            moved += 1
+                            # L'exception elle-meme est conservee (pas
+                            # seulement son texte) : elle est traduite en
+                            # phrase francaise generique au moment de
+                            # construire le message final, sur le thread
+                            # principal (_on_move_finished) - le detail
+                            # technique brut part dans erreurs.log plutot
+                            # que dans la boite de dialogue (bug trouve a
+                            # l'audit, C3).
+                            orphan_copies.append((source.name, exc))
+                        else:
+                            # Echec de copie proprement dit (pas seulement
+                            # de la suppression) : on ne laisse pas trainer
+                            # une copie partielle/corrompue non indexee dans
+                            # le dossier de revision plutot que de revenir a
+                            # un etat coherent.
+                            if dest.exists():
+                                try:
+                                    dest.unlink()
+                                except OSError:
+                                    pass
+                            failed.append((source.name, exc))
+                    else:
+                        worker_db.mark_moved(photo_id, str(dest))
+                        moved += 1
+                on_progress(index, total)
+            self._move_queue.put(("done", moved, failed, already_gone, orphan_copies, review_dir))
+        except Exception as exc:
+            # Filet de securite symetrique a _scan_worker : si l'ouverture
+            # de worker_db ou une erreur inattendue survient, l'exception
+            # part dans la file plutot que de tuer silencieusement le
+            # thread (aucune console dans l'exe package pour le voir),
+            # laissant sinon l'app bloquee indefiniment sur "Deplacement en
+            # cours..." avec les boutons desactives a vie.
+            self._move_queue.put(("error", exc))
+        finally:
+            if worker_db is not None:
+                worker_db.close()
+
+    def _poll_move_queue(self):
+        try:
+            while True:
+                message = self._move_queue.get_nowait()
+                kind = message[0]
+                if kind == "progress":
+                    _, done, total = message
+                    self.progress_bar.configure(value=done, maximum=max(total, 1))
+                    self.status_var.set(f"Deplacement en cours... {done} / {total}")
+                elif kind == "done":
+                    _, moved, failed, already_gone, orphan_copies, review_dir = message
+                    self._on_move_finished(moved, failed, already_gone, orphan_copies, review_dir)
+                    return
+                elif kind == "error":
+                    self._moving = False
+                    self.scan_button.configure(state="normal")
+                    self._set_scan_controls_state("normal")
+                    self.progress_bar.configure(value=0)
+                    self.status_var.set("")
+                    self._show_friendly_error("Le deplacement a echoue", message[1])
+                    return
+        except queue.Empty:
+            pass
+        if self._moving:
+            self.root.after(100, self._poll_move_queue)
+
+    def _on_move_finished(self, moved: int, failed: list, already_gone: int, orphan_copies: list, review_dir: Path) -> None:
+        """Reprend la main sur le thread principal une fois _move_worker
+        termine : reactive les controles, construit le message recapitulatif
+        (texte francais uniquement, voir _friendly_error_text/C3) et
+        rafraichit les groupes - la meme logique qu'avant le passage au
+        thread dedie, simplement deplacee ici plutot qu'executee en ligne a
+        la fin de _move_checked_photos."""
+        self._moving = False
+        self.scan_button.configure(state="normal")
+        self._set_scan_controls_state("normal")
+        self.status_var.set("")
 
         message = f"{moved} photo(s) deplacee(s) vers :\n{review_dir}"
         if already_gone:
@@ -1157,6 +1416,16 @@ class PhotoTriApp:
                 # le thread daemon pouvait etre tue brutalement par l'arret
                 # du process en pleine transaction sur `worker_db`.
                 self._scan_thread.join(timeout=3)
+        if self._moving and self._move_thread is not None:
+            # Meme raisonnement que ci-dessus pour _scan_thread, applique a
+            # _move_worker depuis son passage sur un thread dedie : le
+            # deplacement n'a pas d'equivalent de _stop_event (pas
+            # interrompable proprement au milieu d'un shutil.move), donc ce
+            # join se contente d'attendre (borne a 3s) la fin de l'ecriture
+            # SQLite en cours sur `worker_db` plutot que de laisser le
+            # thread daemon se faire tuer brutalement par la fermeture du
+            # process pendant une transaction.
+            self._move_thread.join(timeout=3)
         self.db.close()
         self.root.destroy()
 

@@ -26,7 +26,17 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    # UPX desactive (trouvaille d'audit du 2026-07-28, alignee sur
+    # GuideExpress qui a deja ce meme correctif pour la meme raison) : la
+    # compression UPX est une technique aussi largement utilisee par des
+    # malwares pour echapper a la detection par signature - sa presence est
+    # un facteur aggravant bien identifie de faux positif antivirus pour les
+    # executables PyInstaller, en particulier non signes (comme PhotoTri.exe
+    # aujourd'hui - aucune signature de code Windows en place). Desactiver
+    # UPX est le levier le plus simple et le plus documente pour reduire ce
+    # risque, au prix d'un executable un peu plus volumineux - compromis
+    # raisonnable ici.
+    upx=False,
     upx_exclude=[],
     runtime_tmpdir=None,
     console=False,

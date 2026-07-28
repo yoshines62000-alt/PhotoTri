@@ -1,3 +1,4 @@
+import re
 import struct
 import sys
 import tempfile
@@ -434,6 +435,83 @@ class TestLongPathPrefix(unittest.TestCase):
             h = hashing.compute_dhash_from_path(p)
         self.assertEqual(calls, [str(p)])
         self.assertIsInstance(h, int)
+
+
+class TestOpenImageHelper(unittest.TestCase):
+    """Verrouille F4 (audit du 2026-07-28) : le motif
+    `Image.open(long_path(...), formats=ALLOWED_PILLOW_FORMATS)` etait
+    duplique a 4 emplacements du projet (compute_dhash_from_path et
+    compute_color_signature_from_path ci-dessus, plus scanner.py et
+    gui.py) - desormais factorise dans hashing.open_image(), reutilisee
+    aux 4 memes emplacements sans changer leur comportement respectif."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+
+    def test_open_image_applies_the_format_restriction(self):
+        # Meme garantie que Image.open(..., formats=ALLOWED_PILLOW_FORMATS)
+        # directement (voir TestFormatRestrictionIsAppliedOnOpen) : un
+        # fichier .jpg dont le contenu reel est un format hors de la liste
+        # autorisee (ici PPM) doit echouer a l'ouverture via open_image.
+        disguised = self.tmp / "deguise.jpg"
+        Image.new("RGB", (16, 16), "green").save(disguised, format="PPM")
+        with self.assertRaises(Exception):
+            with hashing.open_image(disguised) as img:
+                img.load()
+
+    def test_open_image_opens_an_allowed_format_normally(self):
+        p = self.tmp / "gradient.png"
+        _make_image(p, "gradient")
+        with hashing.open_image(p) as img:
+            self.assertEqual(img.format, "PNG")
+
+    def test_open_image_is_usable_as_a_context_manager_like_image_open(self):
+        # Reproduit exactement l'usage de gui.py (_build_photo_card) : ouvrir
+        # dans un `with`, appeler .draft() puis .copy() l'image AVANT la fin
+        # du bloc pour continuer a l'utiliser apres la fermeture du fichier -
+        # doit fonctionner a l'identique de Image.open() appele directement,
+        # puisque open_image() renvoie le meme objet Image (__enter__/
+        # __exit__ inchanges).
+        p = self.tmp / "gradient.png"
+        _make_image(p, "gradient", size=(300, 300))
+        with hashing.open_image(p) as img:
+            img.draft("RGB", (150, 150))
+            copy = img.copy()
+        copy.thumbnail((150, 150))
+        self.assertLessEqual(copy.size[0], 150)
+        self.assertLessEqual(copy.size[1], 150)
+
+    def test_open_image_applies_long_path_to_the_actual_open_call(self):
+        p = self.tmp / "gradient.png"
+        _make_image(p, "gradient")
+        calls = []
+        real_long_path = hashing.long_path
+
+        def spy(path):
+            calls.append(str(path))
+            return real_long_path(path)
+
+        with unittest.mock.patch.object(hashing, "long_path", side_effect=spy):
+            with hashing.open_image(p) as img:
+                img.load()
+        self.assertEqual(calls, [str(p)])
+
+    def test_scanner_and_gui_route_image_opening_through_the_shared_helper(self):
+        # Garde-fou anti-regression pour F4 : verifie que les deux
+        # emplacements historiquement dupliques hors de hashing.py
+        # (scanner.py, gui.py) appellent bien hashing.open_image() plutot
+        # que de reintroduire un appel direct a
+        # Image.open(long_path(...), formats=...) - la duplication corrigee
+        # par ce refactor pourrait sinon reapparaitre silencieusement au fil
+        # de futures modifications sans qu'aucun autre test ne le remarque.
+        project_root = Path(__file__).resolve().parent.parent
+        scanner_src = (project_root / "scanner.py").read_text(encoding="utf-8")
+        gui_src = (project_root / "gui.py").read_text(encoding="utf-8")
+        self.assertIn("hashing.open_image(", scanner_src)
+        self.assertIn("hashing.open_image(", gui_src)
+        duplicated_pattern = re.compile(r"Image\.open\(\s*(?:hashing\.)?long_path\(")
+        self.assertNotRegex(scanner_src, duplicated_pattern)
+        self.assertNotRegex(gui_src, duplicated_pattern)
 
 
 if __name__ == "__main__":

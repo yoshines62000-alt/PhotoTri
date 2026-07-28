@@ -10,6 +10,7 @@ import shutil
 import sqlite3
 import sys
 import tempfile
+import threading
 import time
 import types
 import unittest
@@ -405,6 +406,103 @@ class TestConfidenceIndicatorInUI(unittest.TestCase):
         self.assertNotIn("Distance :", joined)
 
 
+class TestRefreshGroupsPassesBandsMatchingSensitivityThreshold(unittest.TestCase):
+    """Verrouille le correctif de l'audit du 2026-07-28 (gui.py:301) : le
+    Spinbox de sensibilite (plage 0-20) permettait a l'utilisateur de
+    depasser grouping.DEFAULT_BANDS (8) sans que la valeur choisie n'ait
+    jamais d'effet reel sur le parametre `bands` transmis a
+    grouping.group_photos() - toujours fige a DEFAULT_BANDS. Or
+    group_photos() n'emprunte son chemin rapide (indexage LSH) que si
+    `near_duplicate_threshold < bands` (voir grouping.py) : tout seuil >= 8
+    retombait donc silencieusement sur la comparaison exhaustive O(n^2)
+    (lente sur une grosse bibliotheque), sans le moindre avertissement ni le
+    moindre gain reel a choisir une valeur superieure a 7 dans le Spinbox.
+    _refresh_groups() doit desormais faire varier `bands` avec le seuil
+    choisi pour que le chemin rapide reste utilisable sur toute la plage
+    0-20 du Spinbox, tout en laissant DEFAULT_BANDS inchange pour la plage
+    0-7 (comportement deja eprouve)."""
+
+    def setUp(self):
+        gc.collect()
+        try:
+            self.root = Tk()
+        except TclError as exc:
+            self.skipTest(f"Pas d'affichage disponible pour un test Tk reel : {exc}")
+        self.tmp_dir = Path(tempfile.mkdtemp())
+        self._apps = []
+
+    def tearDown(self):
+        for app in self._apps:
+            try:
+                app.db.close()
+            except Exception:
+                pass
+        try:
+            self.root.destroy()
+        except TclError:
+            pass
+
+    def _make_app(self) -> "gui.PhotoTriApp":
+        with mock.patch.object(gui, "_data_dir", return_value=self.tmp_dir), \
+             mock.patch.object(gui.update_checker, "start_update_check"):
+            app = gui.PhotoTriApp(self.root)
+        self._apps.append(app)
+        return app
+
+    def _wait_grouping_idle(self, app, timeout=10):
+        deadline = time.monotonic() + timeout
+        while app._grouping_in_progress:
+            self.root.update()
+            time.sleep(0.01)
+            self.assertLess(time.monotonic(), deadline, "le calcul de groupes ne se termine jamais")
+        self.root.update()
+
+    def test_bands_grows_with_threshold_above_default(self):
+        app = self._make_app()
+        app.threshold_var.set(15)  # > DEFAULT_BANDS (8), pourtant autorise par le Spinbox (plage 0-20)
+
+        with mock.patch.object(gui.grouping, "group_photos", return_value=[]) as mock_group_photos:
+            app._refresh_groups()
+            self._wait_grouping_idle(app)
+
+        mock_group_photos.assert_called_once()
+        kwargs = mock_group_photos.call_args.kwargs
+        self.assertEqual(kwargs["near_duplicate_threshold"], 15)
+        self.assertIn("bands", kwargs, "bands doit desormais etre transmis explicitement a group_photos()")
+        self.assertGreater(
+            kwargs["bands"], kwargs["near_duplicate_threshold"],
+            "bands doit rester STRICTEMENT superieur au seuil - condition exacte du chemin rapide de group_photos()",
+        )
+
+    def test_bands_stays_at_default_for_threshold_below_default_bands(self):
+        # Comportement inchange pour la plage 0-7 : DEFAULT_BANDS (8) suffit
+        # deja a garantir le chemin rapide, pas de raison de le faire varier.
+        app = self._make_app()
+        app.threshold_var.set(4)
+
+        with mock.patch.object(gui.grouping, "group_photos", return_value=[]) as mock_group_photos:
+            app._refresh_groups()
+            self._wait_grouping_idle(app)
+
+        kwargs = mock_group_photos.call_args.kwargs
+        self.assertEqual(kwargs["bands"], grouping.DEFAULT_BANDS)
+
+    def test_bands_at_spinbox_maximum_still_exceeds_threshold(self):
+        # Borne haute du Spinbox (to=20, voir threshold_spinbox) : meme au
+        # maximum autorise, bands doit rester superieur au seuil plutot que
+        # de retomber sur la comparaison exhaustive sans avertissement.
+        app = self._make_app()
+        app.threshold_var.set(20)
+
+        with mock.patch.object(gui.grouping, "group_photos", return_value=[]) as mock_group_photos:
+            app._refresh_groups()
+            self._wait_grouping_idle(app)
+
+        kwargs = mock_group_photos.call_args.kwargs
+        self.assertEqual(kwargs["near_duplicate_threshold"], 20)
+        self.assertGreater(kwargs["bands"], 20)
+
+
 class TestOrphanCopyNotLeftUnindexedOnMoveFailure(unittest.TestCase):
     """Verrouille E4 (audit du 2026-07-22) : quand shutil.move() bascule sur
     son chemin copie+suppression (volumes differents) et que SEULE la
@@ -495,6 +593,21 @@ class TestOrphanCopyNotLeftUnindexedOnMoveFailure(unittest.TestCase):
             move_id: gui.BooleanVar(value=True),
         }
 
+    def _wait_move_idle(self, app, timeout=10):
+        """_move_checked_photos() deplace desormais les photos sur un thread
+        dedie (voir gui.py, meme pattern que _scan_worker) plutot qu'en
+        synchrone sur le thread principal - il faut donc pomper la boucle
+        Tkinter (root.update()) jusqu'a ce que le thread ait pousse son
+        resultat dans la file et que _poll_move_queue l'ait traite, avant de
+        pouvoir observer l'etat final (fichiers deplaces, index a jour,
+        messagebox affichee)."""
+        deadline = time.monotonic() + timeout
+        while app._moving:
+            self.root.update()
+            time.sleep(0.01)
+            self.assertLess(time.monotonic(), deadline, "le deplacement ne se termine jamais")
+        self.root.update()
+
     def test_delete_failure_after_successful_copy_is_indexed_not_reported_as_pure_failure(self):
         app = self._make_app()
         keep_id, _ = self._index_photo(app, "garder.jpg")
@@ -512,6 +625,7 @@ class TestOrphanCopyNotLeftUnindexedOnMoveFailure(unittest.TestCase):
 
         with mock.patch.object(gui.shutil, "move", side_effect=fake_move):
             app._move_checked_photos()
+            self._wait_move_idle(app)
 
         dest_path = self.review_dir / "a_deplacer.jpg"
         self.assertTrue(dest_path.exists(), "la copie complete doit rester dans le dossier de revision")
@@ -542,6 +656,7 @@ class TestOrphanCopyNotLeftUnindexedOnMoveFailure(unittest.TestCase):
 
         with mock.patch.object(gui.shutil, "move", side_effect=fake_move):
             app._move_checked_photos()
+            self._wait_move_idle(app)
 
         dest_path = self.review_dir / "echec.jpg"
         self.assertFalse(dest_path.exists(), "aucune copie partielle ne doit rester orpheline")
@@ -815,6 +930,23 @@ class TestDiskSpaceCheckBeforeBatchMove(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
+    def _wait_move_idle(self, app, timeout=10):
+        """_move_checked_photos() deplace desormais les photos sur un thread
+        dedie (voir gui.py, meme pattern que _scan_worker) plutot qu'en
+        synchrone sur le thread principal - il faut donc pomper la boucle
+        Tkinter (root.update()) jusqu'a ce que le thread ait pousse son
+        resultat dans la file et que _poll_move_queue l'ait traite, avant de
+        pouvoir observer l'etat final (fichiers deplaces, index a jour,
+        messagebox affichee). Sans effet (retourne immediatement) si le
+        deplacement ne demarre jamais - ex. refus a la confirmation d'espace
+        disque, qui `return` avant meme de lancer le thread."""
+        deadline = time.monotonic() + timeout
+        while app._moving:
+            self.root.update()
+            time.sleep(0.01)
+            self.assertLess(time.monotonic(), deadline, "le deplacement ne se termine jamais")
+        self.root.update()
+
     def test_insufficient_space_asks_confirmation_and_aborts_when_declined(self):
         app = self._make_app()
         keep_id, _ = self._index_photo(app, "garder.jpg")
@@ -849,6 +981,7 @@ class TestDiskSpaceCheckBeforeBatchMove(unittest.TestCase):
         with mock.patch.object(gui.shutil, "disk_usage") as mock_disk_usage:
             mock_disk_usage.return_value = types.SimpleNamespace(total=10**9, used=10**9 - 1, free=1)
             app._move_checked_photos()
+            self._wait_move_idle(app)
 
         self.mock_askyesno.assert_called_once()
         self.assertFalse(move_path.exists(), "la photo confirmee doit avoir ete deplacee")
@@ -870,6 +1003,7 @@ class TestDiskSpaceCheckBeforeBatchMove(unittest.TestCase):
                 total=10**12, used=0, free=10**12,
             )
             app._move_checked_photos()
+            self._wait_move_idle(app)
 
         self.mock_askyesno.assert_not_called()
         self.assertFalse(move_path.exists(), "le deplacement doit avoir eu lieu normalement")
@@ -894,11 +1028,131 @@ class TestDiskSpaceCheckBeforeBatchMove(unittest.TestCase):
         with mock.patch.object(gui.shutil, "disk_usage") as mock_disk_usage:
             mock_disk_usage.return_value = types.SimpleNamespace(total=10**9, used=10**9 - 1, free=1)
             app._move_checked_photos()
+            self._wait_move_idle(app)
 
         self.mock_askyesno.assert_not_called()
         self.assertFalse(move_path.exists())
         dest_path = self.review_dir / "a_deplacer4.jpg"
         self.assertTrue(dest_path.exists())
+
+
+class TestMoveDoesNotBlockMainThread(unittest.TestCase):
+    """Verrouille le correctif de l'audit du 2026-07-28 : _move_checked_photos()
+    tournait auparavant entierement en synchrone sur le thread principal
+    Tkinter (aucun thread, aucune barre de progression), contrairement au
+    scan (deja threade, voir _scan_worker) - un gros lot de photos gelait
+    l'interface pendant toute la duree du deplacement. `shutil.move` est ici
+    bloque via un threading.Event le temps de verifier que l'appel a
+    _move_checked_photos() revient IMMEDIATEMENT (avant que le fichier ne
+    soit reellement deplace) et que le deplacement s'execute bien sur un
+    thread separe du thread principal - une synchronisation explicite par
+    Event plutot qu'une simple mesure de temps ecoule, pour un test
+    deterministe (pas de faux-negatif possible sous charge CI)."""
+
+    def setUp(self):
+        gc.collect()
+        try:
+            self.root = Tk()
+        except TclError as exc:
+            self.skipTest(f"Pas d'affichage disponible pour un test Tk reel : {exc}")
+        self.tmp_dir = Path(tempfile.mkdtemp())
+        self.photos_dir = self.tmp_dir / "photos"
+        self.photos_dir.mkdir()
+        self.review_dir = self.tmp_dir / "revision"
+        self._apps = []
+
+        self._patchers = [
+            mock.patch("tkinter.messagebox.showerror"),
+            mock.patch("tkinter.messagebox.showinfo"),
+            mock.patch("tkinter.messagebox.showwarning"),
+        ]
+        for p in self._patchers:
+            p.start()
+            self.addCleanup(p.stop)
+        self.addCleanup(mock.patch.stopall)
+
+    def tearDown(self):
+        for app in self._apps:
+            try:
+                app.db.close()
+            except Exception:
+                pass
+        try:
+            self.root.destroy()
+        except TclError:
+            pass
+
+    def _make_app(self) -> "gui.PhotoTriApp":
+        with mock.patch.object(gui, "_data_dir", return_value=self.tmp_dir / "appdata"), \
+             mock.patch.object(gui.update_checker, "start_update_check"):
+            app = gui.PhotoTriApp(self.root)
+        self._apps.append(app)
+        return app
+
+    def _index_photo(self, app, name: str):
+        path = self.photos_dir / name
+        Image.new("RGB", (16, 16), (10, 20, 30)).save(path)
+        stat = path.stat()
+        photo_id = app.db.upsert_photo(
+            str(path), stat.st_size, stat.st_mtime, 16, 16, "sha-test", 0, None,
+        )
+        return photo_id, path
+
+    def test_move_call_returns_before_worker_finishes_and_runs_off_the_main_thread(self):
+        app = self._make_app()
+        keep_id, _ = self._index_photo(app, "garder.jpg")
+        move_id, move_path = self._index_photo(app, "a_deplacer.jpg")
+        group = grouping.PhotoGroup(kind="exact", photo_ids=sorted([keep_id, move_id]), max_distance=0)
+        app._selected_group = group
+        app._checkbox_vars = {
+            keep_id: gui.BooleanVar(value=False),
+            move_id: gui.BooleanVar(value=True),
+        }
+        app.review_folder_var.set(str(self.review_dir))
+
+        main_thread = threading.current_thread()
+        worker_threads = []
+        entered = threading.Event()
+        release = threading.Event()
+        real_move = shutil.move
+
+        def blocking_move(src, dst):
+            # Enregistre le thread d'execution et bloque jusqu'a ce que le
+            # test le libere explicitement (`release`) - le seul moyen de
+            # prouver de facon deterministe que _move_checked_photos() rend
+            # la main avant que ce deplacement ne soit termine, sans
+            # dependre d'un delai arbitraire.
+            worker_threads.append(threading.current_thread())
+            entered.set()
+            release.wait(timeout=5)
+            return real_move(src, dst)
+
+        with mock.patch.object(gui.shutil, "move", side_effect=blocking_move):
+            app._move_checked_photos()
+            # L'appel revient ICI, avant meme que blocking_move() ait pu
+            # rendre la main (bloque sur `release`) - bug trouve a l'audit :
+            # avant ce correctif, cette ligne n'etait atteinte qu'apres la
+            # fin complete du deplacement (execution 100% synchrone).
+            self.assertTrue(entered.wait(timeout=5), "le thread de deplacement n'a jamais demarre")
+            self.assertTrue(app._moving, "_moving doit rester True pendant que le thread travaille encore")
+            self.assertTrue(move_path.exists(), "le fichier ne doit pas encore avoir ete deplace (bloque via l'Event)")
+            self.assertEqual(len(worker_threads), 1)
+            self.assertNotEqual(
+                worker_threads[0], main_thread,
+                "shutil.move doit s'executer sur un thread separe du thread principal Tkinter, pas le geler",
+            )
+
+            release.set()
+            deadline = time.monotonic() + 10
+            while app._moving:
+                self.root.update()
+                time.sleep(0.01)
+                self.assertLess(time.monotonic(), deadline, "le deplacement ne se termine jamais")
+            self.root.update()
+
+        self.assertFalse(move_path.exists(), "le fichier doit finalement avoir ete deplace")
+        row = app.db.get_photo(move_id)
+        self.assertEqual(row["status"], "moved", "l'index doit refleter le deplacement une fois le thread termine")
 
 
 class TestPlaceholderTextReflectsAppState(unittest.TestCase):
@@ -1194,6 +1448,291 @@ class TestRatingStarsOnPhotoCard(unittest.TestCase):
 
         for star_label in app._rating_star_labels[id1]:
             self.assertTrue(star_label.bind("<Button-1>"), "chaque etoile doit avoir un gestionnaire de clic lie")
+
+
+class TestRatingStarsKeyboardAccessible(unittest.TestCase):
+    """Verrouille M2 (audit du 2026-07-28) : avant ce correctif, la
+    notation par etoiles n'etait utilisable qu'a la souris (ttk.Label sans
+    `takefocus` ni binding clavier) - inatteignable par Tab, donc
+    inutilisable au clavier seul. Meme structure de test que
+    TestRatingStarsOnPhotoCard (racine Tk reelle necessaire).
+
+    Verifie la PRESENCE des bindings clavier via `.bind(sequence)` (comme
+    le fait deja test_each_star_label_has_a_click_handler_registered pour
+    <Button-1>) et le COMPORTEMENT en appelant directement les methodes
+    nommees sous-jacentes (_handle_rating_key_press, _focus_star) plutot
+    que de simuler des evenements clavier synthetiques via event_generate()
+    - delibere : `event_generate` s'est revele peu fiable ici pour livrer
+    un vrai focus/evenement clavier une fois plusieurs dizaines de racines
+    Tk reelles creees puis detruites a la suite dans le meme processus (le
+    lot de tests de ce fichier), un artefact de l'environnement de test deja
+    documente ailleurs dans ce fichier (voir le commentaire de setUp de
+    TestRatingStarsOnPhotoCard) plutot qu'un probleme du correctif lui-meme
+    - appeler directement les methodes nommees reste une verification tout
+    aussi fidele du COMPORTEMENT sans dependre de cette livraison."""
+
+    def setUp(self):
+        gc.collect()
+        try:
+            self.root = Tk()
+        except TclError as exc:
+            self.skipTest(f"Pas d'affichage disponible pour un test Tk reel : {exc}")
+        self.tmp_dir = Path(tempfile.mkdtemp())
+        self._apps = []
+
+    def tearDown(self):
+        for app in self._apps:
+            try:
+                app.db.close()
+            except Exception:
+                pass
+        try:
+            self.root.destroy()
+        except TclError:
+            pass
+
+    def _make_app(self) -> "gui.PhotoTriApp":
+        with mock.patch.object(gui, "_data_dir", return_value=self.tmp_dir), \
+             mock.patch.object(gui.update_checker, "start_update_check"):
+            app = gui.PhotoTriApp(self.root)
+        self._apps.append(app)
+        return app
+
+    def _make_image_file(self, name: str) -> Path:
+        path = self.tmp_dir / name
+        Image.new("RGB", (16, 16), (10, 20, 30)).save(path)
+        return path
+
+    def _make_two_photo_group(self, app):
+        p1 = self._make_image_file("a.jpg")
+        p2 = self._make_image_file("b.jpg")
+        id1 = app.db.upsert_photo(str(p1), 1000, 1.0, 800, 600, "sha-same", 0, None)
+        id2 = app.db.upsert_photo(str(p2), 1000, 1.0, 800, 600, "sha-same", 0, None)
+        group = grouping.PhotoGroup(kind="exact", photo_ids=sorted([id1, id2]), max_distance=0)
+        app._show_group_detail(group)
+        self.root.update()
+        return id1, id2
+
+    def test_star_labels_are_focusable(self):
+        app = self._make_app()
+        id1, _ = self._make_two_photo_group(app)
+
+        for star_label in app._rating_star_labels[id1]:
+            self.assertEqual(
+                str(star_label.cget("takefocus")), "1",
+                "chaque etoile doit avoir takefocus active pour etre atteignable au Tab",
+            )
+
+    def test_each_star_label_has_keyboard_activation_handlers_registered(self):
+        # Meme verification que test_each_star_label_has_a_click_handler_registered
+        # (deja dans TestRatingStarsOnPhotoCard) mais pour les 3 sequences
+        # clavier ajoutees par M2 : Entree/Espace (meme action qu'un clic),
+        # <Key> generique (chiffres 1-5, voir _handle_rating_key_press).
+        app = self._make_app()
+        id1, _ = self._make_two_photo_group(app)
+
+        for star_label in app._rating_star_labels[id1]:
+            self.assertTrue(star_label.bind("<Return>"), "Entree doit noter comme un clic")
+            self.assertTrue(star_label.bind("<space>"), "Espace doit noter comme un clic")
+            self.assertTrue(star_label.bind("<Key>"), "un chiffre doit pouvoir noter directement")
+
+    def test_each_star_label_has_arrow_key_navigation_registered(self):
+        app = self._make_app()
+        id1, _ = self._make_two_photo_group(app)
+
+        for star_label in app._rating_star_labels[id1]:
+            self.assertTrue(star_label.bind("<Left>"), "Gauche doit deplacer le focus dans la rangee")
+            self.assertTrue(star_label.bind("<Right>"), "Droite doit deplacer le focus dans la rangee")
+
+    def test_handle_rating_key_press_sets_the_rating_for_a_digit(self):
+        # Comportement reel du binding <Key> (voir _handle_rating_key_press) :
+        # un chiffre 1-5 definit directement la note, sans avoir besoin de
+        # naviguer jusqu'a l'etoile correspondante au prealable.
+        app = self._make_app()
+        id1, _ = self._make_two_photo_group(app)
+
+        app._handle_rating_key_press(id1, "4")
+
+        self.assertEqual(app.db.get_photo(id1)["rating"], 4)
+        labels = app._rating_star_labels[id1]
+        filled = [lbl.cget("text") == "★" for lbl in labels]
+        self.assertEqual(filled, [True, True, True, True, False])
+
+    def test_handle_rating_key_press_toggles_to_zero_on_the_same_digit(self):
+        # Meme regle de toggle qu'un clic sur l'etoile deja active (voir
+        # _set_photo_rating, reutilisee par _handle_rating_key_press).
+        app = self._make_app()
+        id1, _ = self._make_two_photo_group(app)
+        app._handle_rating_key_press(id1, "3")
+        self.assertEqual(app.db.get_photo(id1)["rating"], 3)
+
+        app._handle_rating_key_press(id1, "3")
+
+        self.assertEqual(app.db.get_photo(id1)["rating"], 0)
+
+    def test_handle_rating_key_press_ignores_non_digit_keys(self):
+        app = self._make_app()
+        id1, _ = self._make_two_photo_group(app)
+        app._handle_rating_key_press(id1, "3")
+
+        for char in ("a", "0", "6", "\r", " "):
+            app._handle_rating_key_press(id1, char)
+
+        # Toujours 3 : aucune de ces touches n'est un chiffre 1-5, la note
+        # posee au debut du test ne doit pas avoir bouge.
+        self.assertEqual(app.db.get_photo(id1)["rating"], 3)
+
+    def test_focus_star_moves_focus_to_the_requested_index(self):
+        app = self._make_app()
+        id1, _ = self._make_two_photo_group(app)
+        labels = app._rating_star_labels[id1]
+        for lbl in labels:
+            lbl.focus_set = mock.MagicMock()
+
+        app._focus_star(labels, 3)
+
+        labels[3].focus_set.assert_called_once()
+        for other_index, lbl in enumerate(labels):
+            if other_index != 3:
+                lbl.focus_set.assert_not_called()
+
+    def test_focus_star_clamps_below_the_first_star(self):
+        # Pas de sortie de la rangee par la gauche (index -1 inexistant) -
+        # le focus doit rester sur la premiere etoile.
+        app = self._make_app()
+        id1, _ = self._make_two_photo_group(app)
+        labels = app._rating_star_labels[id1]
+        for lbl in labels:
+            lbl.focus_set = mock.MagicMock()
+
+        app._focus_star(labels, -1)
+
+        labels[0].focus_set.assert_called_once()
+
+    def test_focus_star_clamps_beyond_the_last_star(self):
+        app = self._make_app()
+        id1, _ = self._make_two_photo_group(app)
+        labels = app._rating_star_labels[id1]
+        for lbl in labels:
+            lbl.focus_set = mock.MagicMock()
+
+        app._focus_star(labels, 999)
+
+        labels[-1].focus_set.assert_called_once()
+
+
+class TestDetailThumbnailsArePaginated(unittest.TestCase):
+    """Verrouille M1 (audit du 2026-07-28) : avant ce correctif,
+    _show_group_detail construisait TOUTES les cartes d'un groupe (decodage
+    Pillow + redimensionnement de chaque vignette compris) en une seule
+    passe synchrone sur le thread principal, sans aucune limite - un gros
+    groupe de quasi-doublons pouvait donc geler l'interface. Verifie que
+    l'affichage d'un groupe est desormais borne a
+    gui.DETAIL_THUMBNAILS_PAGE_SIZE cartes, avec un bouton "Afficher plus"
+    pour charger la suite par lots a la demande."""
+
+    def setUp(self):
+        gc.collect()
+        try:
+            self.root = Tk()
+        except TclError as exc:
+            self.skipTest(f"Pas d'affichage disponible pour un test Tk reel : {exc}")
+        self.tmp_dir = Path(tempfile.mkdtemp())
+        self._apps = []
+
+    def tearDown(self):
+        for app in self._apps:
+            try:
+                app.db.close()
+            except Exception:
+                pass
+        try:
+            self.root.destroy()
+        except TclError:
+            pass
+
+    def _make_app(self) -> "gui.PhotoTriApp":
+        with mock.patch.object(gui, "_data_dir", return_value=self.tmp_dir), \
+             mock.patch.object(gui.update_checker, "start_update_check"):
+            app = gui.PhotoTriApp(self.root)
+        self._apps.append(app)
+        return app
+
+    def _make_large_group(self, app, count: int):
+        # Chemins volontairement inexistants sur disque : `path` est une
+        # colonne UNIQUE de la base (voir db.py), donc chaque photo a besoin
+        # d'un chemin distinct, mais _build_photo_card retombe deja
+        # gracieusement sur "[image indisponible]" pour toute photo dont le
+        # fichier ne peut pas etre ouvert (son try/except autour de
+        # hashing.open_image couvre deja FileNotFoundError) - inutile donc
+        # d'ecrire `count` vrais fichiers image juste pour compter des
+        # cartes construites.
+        photo_ids = [
+            app.db.upsert_photo(
+                str(self.tmp_dir / f"photo_{i}.jpg"), 1000, 1.0, 800, 600, "sha-same", 0, None,
+            )
+            for i in range(count)
+        ]
+        group = grouping.PhotoGroup(kind="exact", photo_ids=sorted(photo_ids), max_distance=0)
+        app._show_group_detail(group)
+        self.root.update()
+        return group
+
+    def _card_count(self, app) -> int:
+        return len(app.cards_inner.winfo_children())
+
+    def test_large_group_display_is_capped_to_the_page_size_plus_one_button(self):
+        app = self._make_app()
+        total = gui.DETAIL_THUMBNAILS_PAGE_SIZE + 15
+        self._make_large_group(app, total)
+
+        # +1 : le bouton "Afficher plus" ajoute apres les cartes visibles,
+        # puisque le groupe compte plus de photos que la page courante.
+        self.assertEqual(self._card_count(app), gui.DETAIL_THUMBNAILS_PAGE_SIZE + 1)
+
+    def test_small_group_shows_every_photo_without_a_more_button(self):
+        app = self._make_app()
+        total = min(3, gui.DETAIL_THUMBNAILS_PAGE_SIZE)
+        self._make_large_group(app, total)
+
+        self.assertEqual(self._card_count(app), total)
+
+    def test_clicking_show_more_reveals_additional_thumbnails(self):
+        app = self._make_app()
+        total = gui.DETAIL_THUMBNAILS_PAGE_SIZE + 15
+        self._make_large_group(app, total)
+
+        app._show_more_detail_thumbnails()
+        self.root.update()
+
+        expected_visible = min(2 * gui.DETAIL_THUMBNAILS_PAGE_SIZE, total)
+        # Le groupe compte 35 photos avec PAGE_SIZE=20 : le second lot
+        # affiche donc les 15 restantes sans bouton "Afficher plus" de plus
+        # (35 <= 2 * 20).
+        self.assertEqual(self._card_count(app), expected_visible)
+
+    def test_selecting_a_different_group_resets_pagination(self):
+        app = self._make_app()
+        total = gui.DETAIL_THUMBNAILS_PAGE_SIZE + 15
+        group_a = self._make_large_group(app, total)
+        app._show_more_detail_thumbnails()  # agrandit la pagination du groupe A
+        self.root.update()
+        self.assertGreater(app._detail_visible_count, gui.DETAIL_THUMBNAILS_PAGE_SIZE)
+
+        # Un DEUXIEME groupe, distinct de group_a, redemarre a la premiere
+        # page plutot que d'heriter de la pagination agrandie precedente.
+        p1 = self.tmp_dir / "other1.jpg"
+        p2 = self.tmp_dir / "other2.jpg"
+        Image.new("RGB", (16, 16), (1, 2, 3)).save(p1)
+        Image.new("RGB", (16, 16), (1, 2, 3)).save(p2)
+        id1 = app.db.upsert_photo(str(p1), 1000, 1.0, 800, 600, "sha-other", 0, None)
+        id2 = app.db.upsert_photo(str(p2), 1000, 1.0, 800, 600, "sha-other", 0, None)
+        group_b = grouping.PhotoGroup(kind="exact", photo_ids=sorted([id1, id2]), max_distance=0)
+
+        app._show_group_detail(group_b)
+        self.root.update()
+
+        self.assertEqual(app._detail_visible_count, gui.DETAIL_THUMBNAILS_PAGE_SIZE)
 
 
 if __name__ == "__main__":
