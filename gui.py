@@ -190,8 +190,8 @@ class _Tooltip:
         except Exception:
             pass
         ttk.Label(
-            tw, text=text, foreground="black", font=BODY_FONT,
-            background="#ffffe0", relief="solid", borderwidth=1, padding=(4, 2),
+            tw, text=text, foreground=opl_theme.couleur("texte"), font=BODY_FONT,
+            background=opl_theme.couleur("surbrillance"), relief="solid", borderwidth=1, padding=(4, 2),
         ).pack()
 
     def _hide(self, event=None):
@@ -257,6 +257,19 @@ class PhotoTriApp:
         self._detail_visible_count = DETAIL_THUMBNAILS_PAGE_SIZE
         self._thumbnail_refs: list = []
         self._checkbox_vars: dict = {}
+        # Id de la photo suggeree a garder (keeper) du groupe actuellement
+        # affiche - memorise ici par _show_group_detail pour que l'action
+        # "Cocher les doublons (sauf la suggeree)" sache quelle case ne
+        # JAMAIS cocher, sans recalculer suggest_keeper.
+        self._current_keeper_id = None
+        # Selection persistante inter-groupes (feature "tout sauf la
+        # suggeree", portee "tous les groupes") : ids des photos marquees a
+        # deplacer dans des groupes NON affiches (donc sans BooleanVar en
+        # memoire). _move_checked_photos les reunit avec les cases cochees du
+        # groupe visible. Videe a chaque nouveau calcul de groupes
+        # (_apply_groups) car les ids d'un calcul precedent n'ont plus de
+        # sens apres un regroupement. Ne contient jamais un keeper.
+        self._marked_ids: set = set()
         # Widgets etoiles de notation (J1) indexes par id de photo, pour que
         # les clics ("<Button-1>") et un rafraichissement ulterieur puissent
         # retrouver les 5 Label d'une carte sans reparcourir tout le canvas.
@@ -321,7 +334,7 @@ class PhotoTriApp:
         # l'espace reellement disponible, pour ne jamais repousser les
         # controles de droite (Analyser/Arreter) hors champ - voir
         # _folder_label_available_width.
-        self.folder_label = ttk.Label(top, textvariable=self.folder_label_var, foreground="black", font=BODY_FONT)
+        self.folder_label = ttk.Label(top, textvariable=self.folder_label_var, foreground=opl_theme.couleur("texte"), font=BODY_FONT)
         self.folder_label.pack(side=LEFT, padx=10)
         self._folder_font = tkfont.Font(font=BODY_FONT)
         self._folder_tooltip = _Tooltip(self.folder_label, lambda: self._folder_full_path)
@@ -329,7 +342,7 @@ class PhotoTriApp:
         right_controls = ttk.Frame(top)
         right_controls.pack(side=RIGHT)
         self.right_controls_frame = right_controls
-        ttk.Label(right_controls, text="Sensibilite quasi-doublons :", foreground="black", font=BODY_FONT).pack(side=LEFT)
+        ttk.Label(right_controls, text="Sensibilite quasi-doublons :", foreground=opl_theme.couleur("texte"), font=BODY_FONT).pack(side=LEFT)
         # validate="key" + validatecommand bloque toute saisie non numerique a
         # la racine - bug trouve a l'audit : IntVar.get() levait TclError sur
         # une saisie libre non numerique, plantage silencieux (aucune console
@@ -402,7 +415,7 @@ class PhotoTriApp:
         self.update_status_var = StringVar(value="")
         self.update_status_label = ttk.Label(bottom_bar, textvariable=self.update_status_var, foreground=SECONDARY_TEXT_COLOR)
         self.update_status_label.pack(side=LEFT, padx=(6, 0), pady=4)
-        donate_label = ttk.Label(bottom_bar, text="☕ Soutenir le projet", foreground="#0645AD", cursor="hand2")
+        donate_label = ttk.Label(bottom_bar, text="☕ Soutenir le projet", foreground=opl_theme.couleur("lien"), cursor="hand2")
         donate_label.pack(side=RIGHT, padx=8, pady=4)
         donate_label.bind("<Button-1>", lambda event: webbrowser.open(DONATE_URL))
 
@@ -418,22 +431,44 @@ class PhotoTriApp:
             return
         if status == "update_available":
             self.update_status_var.set(f"Mise a jour disponible : {tag} - Telecharger")
-            self.update_status_label.configure(foreground="#0645AD", cursor="hand2")
+            self.update_status_label.configure(foreground=opl_theme.couleur("lien"), cursor="hand2")
             self.update_status_label.bind("<Button-1>", lambda event: webbrowser.open(RELEASES_URL))
         elif status == "up_to_date":
             self.update_status_var.set("A jour")
-            self.update_status_label.configure(foreground="#1B7A1B", cursor="")
+            self.update_status_label.configure(foreground=opl_theme.couleur("succes"), cursor="")
         # "check_failed" (hors ligne, GitHub inaccessible...) : on ne
         # revendique rien plutot que d'afficher a tort "a jour".
 
     def _build_detail_panel(self, parent):
         self.detail_placeholder = ttk.Label(
             parent, text=PLACEHOLDER_TEXT_INITIAL,
-            foreground="black", font=BODY_FONT, wraplength=500, justify="left",
+            foreground=opl_theme.couleur("texte"), font=BODY_FONT, wraplength=500, justify="left",
         )
         self.detail_placeholder.pack(padx=15, pady=15, anchor="w")
 
         self.detail_frame = ttk.Frame(parent)
+
+        # Barre de selection groupee (feature "tout sauf la photo suggeree") :
+        # coche en un clic tous les doublons a deplacer SAUF la photo suggeree
+        # a garder (le keeper, marque d'une ★). Placee AU-DESSUS des cartes et
+        # separee de la barre d'action "Deplacer" du bas, pour ne pas
+        # comprimer le bouton Deplacer sous sa largeur naturelle (verrouille
+        # par TestMoveButtonLabelFitsItsOwnWidth). Se branche sur les
+        # BooleanVar existantes des cartes (self._checkbox_vars) plutot que de
+        # reinventer un mecanisme de selection.
+        selection_bar = ttk.Frame(self.detail_frame)
+        selection_bar.pack(fill=X, pady=(0, 6))
+        ttk.Label(selection_bar, text="Selection :", style="Section.TLabel").pack(side=LEFT, padx=(0, 6))
+        self.select_dupes_button = ttk.Button(
+            selection_bar, text="Cocher les doublons (sauf ★)",
+            command=lambda: self._check_duplicates_except_keeper(all_groups=False),
+        )
+        self.select_dupes_button.pack(side=LEFT)
+        self.select_dupes_all_button = ttk.Button(
+            selection_bar, text="... dans tous les groupes",
+            command=lambda: self._check_duplicates_except_keeper(all_groups=True),
+        )
+        self.select_dupes_all_button.pack(side=LEFT, padx=(6, 0))
 
         canvas_frame = ttk.Frame(self.detail_frame)
         canvas_frame.pack(fill=BOTH, expand=True)
@@ -450,7 +485,7 @@ class PhotoTriApp:
 
         action_bar = ttk.Frame(self.detail_frame)
         action_bar.pack(fill=X, pady=(8, 0))
-        ttk.Label(action_bar, text="Dossier de revision :", foreground="black", font=BODY_FONT).pack(side=LEFT)
+        ttk.Label(action_bar, text="Dossier de revision :", foreground=opl_theme.couleur("texte"), font=BODY_FONT).pack(side=LEFT)
         ttk.Entry(action_bar, textvariable=self.review_folder_var, width=45, state="readonly").pack(side=LEFT, padx=5)
         self.change_review_button = ttk.Button(action_bar, text="Changer...", command=self._choose_review_folder)
         self.change_review_button.pack(side=LEFT)
@@ -811,6 +846,10 @@ class PhotoTriApp:
         return f"{pct}% - {grouping.confidence_label(group.max_distance, self._last_threshold)}"
 
     def _apply_groups(self, groups: list) -> None:
+        # Toute selection inter-groupes precedente (self._marked_ids) porte
+        # sur des ids issus du calcul precedent : elle n'a plus de sens apres
+        # un nouveau regroupement, on repart d'une selection vide.
+        self._marked_ids.clear()
         self._groups = groups
         self._groups.sort(key=lambda g: (g.kind != "exact", -len(g.photo_ids)))
         # Un seul appel a list_active_photos() puis un dict en memoire,
@@ -885,6 +924,7 @@ class PhotoTriApp:
             widget.destroy()
 
         if group is None:
+            self._current_keeper_id = None
             self.detail_frame.pack_forget()
             self.detail_placeholder.pack(padx=15, pady=15, anchor="w")
             return
@@ -901,10 +941,11 @@ class PhotoTriApp:
             ttk.Label(
                 self.cards_inner,
                 text="Ce groupe n'est plus valide (photo(s) disparue(s) depuis le calcul - relancez une analyse).",
-                foreground="black", font=BODY_FONT, wraplength=500,
+                foreground=opl_theme.couleur("texte"), font=BODY_FONT, wraplength=500,
             ).grid(row=0, column=0, padx=15, pady=15)
             return
         keeper_id = grouping.suggest_keeper(photos)
+        self._current_keeper_id = keeper_id
         keeper_phash = phash_from_sqlite(next(p["phash"] for p in photos if p["id"] == keeper_id))
 
         # Pagination (M1 de l'audit du 2026-07-28) : seules les
@@ -944,7 +985,7 @@ class PhotoTriApp:
         self._show_group_detail(self._selected_group)
 
     def _build_photo_card(self, parent, column, photo, is_keeper: bool, group_kind: str, keeper_phash: int):
-        card = ttk.Frame(parent, relief="groove", borderwidth=1, padding=6)
+        card = ttk.Frame(parent, relief="solid", borderwidth=1, padding=6)
         card.grid(row=0, column=column, padx=6, pady=6, sticky="n")
 
         thumb_label = ttk.Label(card)
@@ -968,10 +1009,10 @@ class PhotoTriApp:
             self._thumbnail_refs.append(photo_image)
             thumb_label.configure(image=photo_image)
         except Exception:
-            thumb_label.configure(text="[image indisponible]", foreground="black", font=BODY_FONT, width=20)
+            thumb_label.configure(text="[image indisponible]", foreground=opl_theme.couleur("texte"), font=BODY_FONT, width=20)
 
         filename = Path(photo["path"]).name
-        ttk.Label(card, text=filename, foreground="black", font=BODY_FONT, wraplength=THUMBNAIL_SIZE[0]).pack()
+        ttk.Label(card, text=filename, foreground=opl_theme.couleur("texte"), font=BODY_FONT, wraplength=THUMBNAIL_SIZE[0]).pack()
         dims = f"{photo['width'] or '?'} x {photo['height'] or '?'}" if photo["width"] else "Dimensions inconnues"
         ttk.Label(card, text=f"{dims} - {_format_size(photo['size'])}", foreground=SECONDARY_TEXT_COLOR).pack()
         ttk.Label(card, text=photo["taken_at"][:10] if photo["taken_at"] else "Date inconnue", foreground=SECONDARY_TEXT_COLOR).pack()
@@ -989,7 +1030,7 @@ class PhotoTriApp:
             ttk.Label(card, text=f"Distance : {distance}/{self._last_threshold}", foreground=SECONDARY_TEXT_COLOR).pack()
 
         if is_keeper:
-            ttk.Label(card, text="★ Suggeree a garder", foreground="#1B7A1B", font=BODY_FONT).pack(pady=(2, 0))
+            ttk.Label(card, text="★ Suggeree a garder", foreground=opl_theme.couleur("succes"), font=BODY_FONT).pack(pady=(2, 0))
 
         # Notation 0-5 etoiles (correctif de l'audit, J1) : la colonne
         # `rating`/`Database.set_rating()` etaient entierement implementees
@@ -1122,6 +1163,45 @@ class PhotoTriApp:
 
     # -- deplacement non destructif -------------------------------------------------
 
+    def _check_duplicates_except_keeper(self, all_groups: bool = False) -> None:
+        """Coche en un clic toutes les photos "a deplacer" SAUF la photo
+        suggeree a garder (le keeper), soit pour le seul groupe affiche
+        (all_groups=False), soit pour l'ensemble des groupes calcules
+        (all_groups=True).
+
+        Se branche sur le mecanisme de cases EXISTANT plutot que d'en creer
+        un nouveau : pour le groupe affiche, ce sont directement les
+        BooleanVar des cartes (self._checkbox_vars) qui sont mises a jour, ce
+        qui rafraichit l'etat visuel des Checkbutton immediatement. Pour les
+        AUTRES groupes (non affiches, donc sans carte ni BooleanVar en
+        memoire), les ids retenus sont memorises dans self._marked_ids ;
+        _move_checked_photos les reunit ensuite avec les cases cochees du
+        groupe visible pour tout deplacer en une fois.
+
+        Le keeper n'est JAMAIS coche par cette action : il est meme
+        explicitement retire de self._marked_ids s'il y figurait."""
+        if self._selected_group is None:
+            return
+        groups = list(self._groups) if all_groups else [self._selected_group]
+        for group in groups:
+            photos = [p for p in (self.db.get_photo(pid) for pid in group.photo_ids) if p is not None]
+            if len(photos) < 2:
+                continue
+            keeper_id = grouping.suggest_keeper(photos)
+            for photo in photos:
+                if photo["id"] == keeper_id:
+                    self._marked_ids.discard(photo["id"])
+                else:
+                    self._marked_ids.add(photo["id"])
+        # Reflete la selection sur les cases du groupe actuellement affiche
+        # (les seules dont les BooleanVar existent en memoire) - le keeper du
+        # groupe visible reste explicitement decoche.
+        for pid, var in self._checkbox_vars.items():
+            if pid == self._current_keeper_id:
+                var.set(False)
+            elif pid in self._marked_ids:
+                var.set(True)
+
     def _move_checked_photos(self):
         if self._selected_group is None:
             return
@@ -1135,7 +1215,16 @@ class PhotoTriApp:
         # tourne encore.
         if self._scanning or self._grouping_in_progress or self._moving:
             return
-        checked_ids = [pid for pid, var in self._checkbox_vars.items() if var.get()]
+        checked_visible = {pid for pid, var in self._checkbox_vars.items() if var.get()}
+        # Reunit les cases cochees du groupe affiche avec les photos marquees
+        # dans les AUTRES groupes via "Cocher ... dans tous les groupes"
+        # (self._marked_ids) - ces dernieres n'ont pas de BooleanVar en
+        # memoire tant que leur groupe n'est pas affiche. Pour le groupe
+        # visible, la case fait foi (une case decochee a la main prime sur un
+        # marquage anterieur), d'ou l'exclusion des pid deja presents dans
+        # _checkbox_vars. Selection vide par defaut : comportement inchange.
+        checked_hidden = {pid for pid in self._marked_ids if pid not in self._checkbox_vars}
+        checked_ids = sorted(checked_visible | checked_hidden)
         if not checked_ids:
             messagebox.showinfo(APP_TITLE, "Aucune photo cochee.")
             return

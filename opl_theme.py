@@ -55,8 +55,13 @@ from tkinter import ttk
 
 __all__ = ["apply", "entete", "carte", "PALETTE", "couleur", "police"]
 
-# --- Palette --------------------------------------------------------------
-PALETTE = {
+# --- Palette (deux modes) -------------------------------------------------
+# Les accents de marque (cyan/émeraude/encre) sont communs aux deux modes : ils
+# ressortent aussi bien sur clair que sur sombre. Seules changent les surfaces
+# et le texte. `PALETTE` est le dictionnaire ACTIF ; apply() le bascule selon le
+# mode AVANT que l'appli ne construise ses widgets — c'est pourquoi couleur(),
+# lu à la création de chaque widget, rend la bonne teinte dans les deux modes.
+_LIGHT = {
     "encre": "#0A0F1A",
     "ardoise": "#131C2E",
     "ardoise_clair": "#1E2B44",
@@ -76,7 +81,74 @@ PALETTE = {
     "survol": "#E8F0FC",
     "danger": "#DC2626",
     "danger_bg": "#FEE2E2",
+    "lien": "#0EA5C4",
+    "succes": "#10B981",
+    "avertissement": "#B45309",
+    "avertissement_bg": "#FEF3C7",
+    "surbrillance": "#FEF9C3",
 }
+_DARK = {
+    "encre": "#0A0F1A",           # reste le texte SUR les boutons cyan (lisible)
+    "ardoise": "#0C1422",         # bandeau, un cran sous le fond
+    "ardoise_clair": "#1B2740",
+    "cyan": "#22D3EE",
+    "cyan_fonce": "#38BEE0",
+    "emeraude": "#34D399",
+    "emeraude_fonce": "#34D399",
+    "vert_lab": "#3DDC97",
+    "gris_texte": "#8A9EB8",
+    "fond": "#0F1626",            # fond général sombre
+    "surface": "#16203A",         # champs, listes, cartes
+    "surface_2": "#1B2740",
+    "bordure": "#2A3A57",
+    "bordure_forte": "#3A4E70",
+    "texte": "#EAF2FF",
+    "texte_doux": "#9DB0C9",
+    "survol": "#22304C",
+    "danger": "#F87171",
+    "danger_bg": "#3A1D1D",
+    "lien": "#38BEE0",
+    "succes": "#34D399",
+    "avertissement": "#FBBF24",
+    "avertissement_bg": "#3A2E12",
+    "surbrillance": "#3A340F",
+}
+PALETTE = dict(_LIGHT)   # dictionnaire ACTIF, basculé par apply()
+
+
+def _resoudre_mode(mode):
+    """mode explicite ('light'/'dark') sinon préférence enregistrée sinon clair."""
+    if mode in ("light", "dark"):
+        return mode
+    try:
+        val = _pref_path().read_text(encoding="utf-8").strip().lower()
+        return "dark" if val == "dark" else "light"
+    except Exception:
+        return "light"
+
+
+def _pref_path() -> Path:
+    base = os.environ.get("APPDATA") if sys.platform.startswith("win") else None
+    racine = Path(base) if base else Path.home() / ".config"
+    d = racine / "OpenProjectsLab"
+    d.mkdir(parents=True, exist_ok=True)
+    return d / "theme.txt"
+
+
+def mode_actuel() -> str:
+    """Renvoie le mode réellement appliqué au dernier apply() ('light'/'dark')."""
+    return _MODE[0]
+
+
+def definir_mode(mode: str) -> None:
+    """Enregistre la préférence de thème (prise en compte au prochain apply())."""
+    try:
+        _pref_path().write_text("dark" if mode == "dark" else "light", encoding="utf-8")
+    except Exception:
+        pass
+
+
+_MODE = ["light"]  # mode réellement actif, mis à jour par apply()
 
 # polices résolues au premier apply(), réutilisables par les applis via police()
 _POLICES: dict[str, tuple] = {}
@@ -122,9 +194,12 @@ def _charger_images(root: tk.Misc) -> dict | None:
     # Chemin des assets, compatible PyInstaller : en exécutable gelé, les
     # données embarquées sont sous sys._MEIPASS (même schéma que le
     # _resource_path() de chaque appli) ; en source, à côté de ce fichier. Le
-    # .spec doit inclure opl_assets dans `datas` — sinon repli plat honnête.
+    # .spec doit inclure opl_assets ET opl_assets_dark dans `datas` — sinon
+    # repli plat honnête. Le sous-dossier dépend du mode actif.
     base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
-    dossier = base / "opl_assets"
+    dossier = base / ("opl_assets_dark" if _MODE[0] == "dark" else "opl_assets")
+    if not dossier.exists():                       # pas d'assets sombres ? on
+        dossier = base / "opl_assets"              # retombe sur les clairs
     imgs: dict = {}
     try:
         for nom in _ASSETS:
@@ -272,8 +347,19 @@ def _appliquer_images(style: ttk.Style, imgs: dict, titre: str, corps: str) -> l
     return echecs
 
 
-def apply(root: tk.Misc, nom_appli: str = "", *, base: str = "clam") -> ttk.Style:
-    """Applique le thème OPL Pro à `root`. Renvoie le ttk.Style pour affinage."""
+def apply(root: tk.Misc, nom_appli: str = "", *, base: str = "clam", mode=None) -> ttk.Style:
+    """Applique le thème OPL Pro à `root`. Renvoie le ttk.Style pour affinage.
+
+    `mode` : 'light' | 'dark' | None. None ⇒ préférence enregistrée (défaut
+    clair). Le mode doit être fixé AVANT que l'appli ne construise ses widgets
+    (contrat identique à celui d'option_add) : PALETTE actif est basculé ici,
+    donc chaque couleur() lue à la création rend la bonne teinte.
+    """
+    mode = _resoudre_mode(mode)
+    _MODE[0] = mode
+    PALETTE.clear()
+    PALETTE.update(_DARK if mode == "dark" else _LIGHT)
+
     style = ttk.Style(root)
     try:
         style.theme_use(base)
@@ -324,7 +410,53 @@ def apply(root: tk.Misc, nom_appli: str = "", *, base: str = "clam") -> ttk.Styl
         ("*Menu.relief", "flat"),
         ("*Menu.activeBorderWidth", 0),
         ("*Toplevel.background", p["fond"]),
+        # --- widgets Tk CLASSIQUES (tk.Frame/Label/Button/Entry/…) ---------
+        # Les 7 applis en utilisent des centaines. ttk ne les stylise pas et
+        # option_add non plus par défaut : en clair ils passaient inaperçus
+        # (défauts Windows ≈ palette claire), mais en SOMBRE ils restaient des
+        # blocs clairs (ex. la barre de statut de DownloadOrganizer). On pose
+        # donc des défauts pour chaque type classique — une couleur explicite
+        # de l'appli (via couleur()) reste prioritaire, ces valeurs ne sont que
+        # le repli.
+        ("*Frame.background", p["fond"]),
+        ("*Labelframe.background", p["fond"]),
+        ("*Labelframe.foreground", p["texte_doux"]),
+        ("*Label.background", p["fond"]),
+        ("*Label.foreground", p["texte"]),
+        ("*Button.background", p["surface"]),
+        ("*Button.foreground", p["texte"]),
+        ("*Button.activeBackground", p["survol"]),
+        ("*Button.activeForeground", p["texte"]),
+        ("*Button.highlightBackground", p["fond"]),
+        ("*Button.disabledForeground", p["texte_doux"]),
+        ("*Entry.background", p["surface"]),
+        ("*Entry.foreground", p["texte"]),
+        ("*Entry.insertBackground", p["cyan"]),
+        ("*Entry.selectBackground", p["survol"]),
+        ("*Entry.selectForeground", p["texte"]),
+        ("*Entry.disabledBackground", p["fond"]),
+        ("*Entry.readonlyBackground", p["surface_2"]),
         ("*Entry.highlightThickness", 0),
+        ("*Checkbutton.background", p["fond"]),
+        ("*Checkbutton.foreground", p["texte"]),
+        ("*Checkbutton.activeBackground", p["fond"]),
+        ("*Checkbutton.activeForeground", p["texte"]),
+        ("*Checkbutton.selectColor", p["surface"]),
+        ("*Radiobutton.background", p["fond"]),
+        ("*Radiobutton.foreground", p["texte"]),
+        ("*Radiobutton.activeBackground", p["fond"]),
+        ("*Radiobutton.activeForeground", p["texte"]),
+        ("*Radiobutton.selectColor", p["surface"]),
+        ("*Scale.background", p["fond"]),
+        ("*Scale.foreground", p["texte"]),
+        ("*Scale.troughColor", p["surface_2"]),
+        ("*Scale.activeBackground", p["survol"]),
+        ("*Scale.highlightThickness", 0),
+        ("*Spinbox.background", p["surface"]),
+        ("*Spinbox.foreground", p["texte"]),
+        ("*Spinbox.insertBackground", p["cyan"]),
+        ("*Spinbox.buttonBackground", p["surface"]),
+        ("*Spinbox.readonlyBackground", p["surface_2"]),
     ):
         root.option_add(motif, valeur)
 
@@ -358,10 +490,25 @@ def apply(root: tk.Misc, nom_appli: str = "", *, base: str = "clam") -> ttk.Styl
 
     style.configure("TEntry", fieldbackground=p["surface"], foreground=p["texte"],
                     bordercolor=p["bordure"], insertcolor=p["cyan"], padding=6, relief="flat")
-    style.map("TEntry", bordercolor=[("focus", p["cyan"])])
+    # États readonly/disabled : sans ces maps, clam retombe sur SON fond clair
+    # par défaut → champ blanc en mode sombre (glitch trouvé à l'audit live).
+    style.map("TEntry",
+              bordercolor=[("focus", p["cyan"])],
+              fieldbackground=[("readonly", p["surface_2"]), ("disabled", p["fond"])],
+              foreground=[("readonly", p["texte"]), ("disabled", p["texte_doux"])])
     style.configure("TCombobox", fieldbackground=p["surface"], background=p["surface"],
                     foreground=p["texte"], bordercolor=p["bordure"], arrowcolor=p["texte_doux"], padding=6)
-    style.map("TCombobox", bordercolor=[("focus", p["cyan"])], arrowcolor=[("active", p["cyan"])])
+    style.map("TCombobox",
+              bordercolor=[("focus", p["cyan"])],
+              arrowcolor=[("active", p["cyan"])],
+              fieldbackground=[("readonly", p["surface"]), ("disabled", p["fond"])],
+              background=[("readonly", p["surface"]), ("disabled", p["fond"])],
+              foreground=[("readonly", p["texte"]), ("disabled", p["texte_doux"])])
+    # Liste déroulante de la combobox (Listbox interne) : la teindre aussi.
+    root.option_add("*TCombobox*Listbox.background", p["surface"])
+    root.option_add("*TCombobox*Listbox.foreground", p["texte"])
+    root.option_add("*TCombobox*Listbox.selectBackground", p["cyan"])
+    root.option_add("*TCombobox*Listbox.selectForeground", p["encre"])
     style.configure("TCheckbutton", background=p["fond"], foreground=p["texte"])
     style.map("TCheckbutton", indicatorcolor=[("selected", p["cyan"])])
     style.configure("TRadiobutton", background=p["fond"], foreground=p["texte"])
@@ -393,7 +540,10 @@ def apply(root: tk.Misc, nom_appli: str = "", *, base: str = "clam") -> ttk.Styl
     style.configure("TScale", background=p["fond"], troughcolor=p["surface_2"])
     style.configure("TSpinbox", fieldbackground=p["surface"], foreground=p["texte"],
                     bordercolor=p["bordure"], arrowcolor=p["texte_doux"], padding=6, relief="flat")
-    style.map("TSpinbox", bordercolor=[("focus", p["cyan"])])
+    style.map("TSpinbox",
+              bordercolor=[("focus", p["cyan"])],
+              fieldbackground=[("readonly", p["surface_2"]), ("disabled", p["fond"])],
+              foreground=[("readonly", p["texte"]), ("disabled", p["texte_doux"])])
 
     # --- styles nommés (hiérarchie typographique partagée) ----------------
     style.configure("Display.TLabel", background=p["fond"], foreground=p["texte"], font=(titre, 22))
@@ -408,6 +558,11 @@ def apply(root: tk.Misc, nom_appli: str = "", *, base: str = "clam") -> ttk.Styl
     style.configure("Carte.TLabel", background=p["surface"], foreground=p["texte"])
     style.configure("CarteTitre.TLabel", background=p["surface"], foreground=p["texte"], font=(titre, 13))
     style.configure("CarteDoux.TLabel", background=p["surface"], foreground=p["texte_doux"], font=(corps, 10))
+    # Barre de statut : un ttk.Label relief="sunken" rend un fond CLAIR sous
+    # clam (quirk confirmé à l'audit live, glaring en sombre). Ce style plat sur
+    # surface_2 donne le même effet « champ discret » et se teinte correctement
+    # dans les deux modes.
+    style.configure("Statut.TLabel", background=p["surface_2"], foreground=p["texte_doux"], padding=(8, 3))
     # Cartes en version PLATE (défaut, rapide) : surface blanche + hairline via
     # relief. La version arrondie (image) ne prend le dessus que sous OPL_ROUNDED.
     style.configure("Card.TFrame", background=p["surface"], relief="solid",
@@ -453,13 +608,58 @@ def entete(parent: tk.Misc, nom_appli: str, accroche: str = "", *,
     droite.pack(side="right", anchor="ne")
     if badge:
         ttk.Label(droite, text=badge, style="EntetePuce.TLabel").pack(anchor="e")
+
+    def _lien(texte, action):
+        lab = ttk.Label(droite, text=texte, style="EnteteLien.TLabel", cursor="hand2")
+        lab.pack(anchor="e", pady=(8, 0))
+        lab.bind("<Button-1>", lambda _e: action())
+        lab.bind("<Enter>", lambda _e: lab.configure(foreground="#EAF2FF"))
+        lab.bind("<Leave>", lambda _e: lab.configure(foreground=PALETTE["cyan"]))
+        return lab
+
+    # Bascule clair/sombre : toujours présente. Le libellé annonce la cible.
+    _lien("☀  Mode clair" if _MODE[0] == "dark" else "☾  Mode sombre",
+          lambda: basculer(parent))
     if on_contact is not None:
-        lien = ttk.Label(droite, text="✉  Contact", style="EnteteLien.TLabel", cursor="hand2")
-        lien.pack(anchor="e", pady=(8, 0))
-        lien.bind("<Button-1>", lambda _e: on_contact())
-        lien.bind("<Enter>", lambda _e: lien.configure(foreground="#EAF2FF"))
-        lien.bind("<Leave>", lambda _e: lien.configure(foreground=PALETTE["cyan"]))
+        _lien("✉  Contact", on_contact)
     return cadre
+
+
+def basculer(parent: tk.Misc) -> str:
+    """Inverse clair/sombre : enregistre la préférence, puis propose un
+    redémarrage pour l'appliquer proprement.
+
+    Pourquoi un redémarrage plutôt qu'un basculement à chaud : les couleurs
+    passées à la CRÉATION d'un widget (via couleur()) sont figées ; un simple
+    re-apply() laisserait du texte « clair » illisible sur fond sombre. Recréer
+    l'UI au lancement suivant garantit un rendu correct partout.
+    """
+    nouveau = "light" if _MODE[0] == "dark" else "dark"
+    definir_mode(nouveau)
+    from tkinter import messagebox
+    libelle = "sombre" if nouveau == "dark" else "clair"
+    try:
+        relancer = messagebox.askyesno(
+            "Thème",
+            f"Thème {libelle} enregistré.\nRedémarrer l'application maintenant pour l'appliquer ?",
+            parent=parent)
+    except tk.TclError:
+        relancer = False
+    if relancer:
+        _relancer(parent)
+    return nouveau
+
+
+def _relancer(parent: tk.Misc) -> None:
+    """Relance le processus courant (source ou exécutable gelé)."""
+    try:
+        parent.winfo_toplevel().destroy()
+    except Exception:
+        pass
+    if getattr(sys, "frozen", False):
+        os.execv(sys.executable, [sys.executable, *sys.argv[1:]])
+    else:
+        os.execv(sys.executable, [sys.executable, *sys.argv])
 
 
 def carte(parent: tk.Misc, titre: str = "", *, doux: bool = False, **kw) -> ttk.Frame:

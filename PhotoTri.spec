@@ -5,7 +5,7 @@ a = Analysis(
     ['gui.py'],
     pathex=[],
     binaries=[],
-    datas=[('opl_assets', 'opl_assets'), ('icon.ico', '.')],
+    datas=[('opl_assets', 'opl_assets'), ('opl_assets_dark', 'opl_assets_dark'), ('icon.ico', '.')],
     hiddenimports=['pillow_heif', '_pillow_heif'],
     hookspath=[],
     hooksconfig={},

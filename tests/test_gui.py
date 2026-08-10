@@ -1735,5 +1735,134 @@ class TestDetailThumbnailsArePaginated(unittest.TestCase):
         self.assertEqual(app._detail_visible_count, gui.DETAIL_THUMBNAILS_PAGE_SIZE)
 
 
+class TestCheckAllDuplicatesExceptKeeper(unittest.TestCase):
+    """Verrouille la feature "tout sauf la photo suggeree" : un clic coche
+    toutes les photos "a deplacer" d'un groupe SAUF le keeper (la photo
+    suggeree a garder), en se branchant sur les BooleanVar existantes des
+    cartes (self._checkbox_vars). Deux portees : le groupe affiche seul, ou
+    tous les groupes calcules (via self._marked_ids, consomme par
+    _move_checked_photos). Le keeper ne doit JAMAIS etre coche."""
+
+    def setUp(self):
+        gc.collect()
+        try:
+            self.root = Tk()
+        except TclError as exc:
+            self.skipTest(f"Pas d'affichage disponible pour un test Tk reel : {exc}")
+        self.tmp_dir = Path(tempfile.mkdtemp())
+        self._apps = []
+
+    def tearDown(self):
+        for app in self._apps:
+            try:
+                app.db.close()
+            except Exception:
+                pass
+        try:
+            self.root.destroy()
+        except TclError:
+            pass
+        # Libere sans attendre le garbage CYCLIQUE laisse par la destruction
+        # de la racine Tk (fermetures auto-referentes des commandes Tcl que
+        # Widget.destroy() ne libere pas seul - meme motif que le gc.collect()
+        # de setUp) : sans ce nettoyage, l'accumulation au fil de la suite
+        # complete peut retarder une collecte automatique pile pendant
+        # l'attente bornee d'un thread d'arriere-plan d'un test ulterieur.
+        gc.collect()
+
+    def _make_app(self) -> "gui.PhotoTriApp":
+        with mock.patch.object(gui, "_data_dir", return_value=self.tmp_dir), \
+             mock.patch.object(gui.update_checker, "start_update_check"):
+            app = gui.PhotoTriApp(self.root)
+        self._apps.append(app)
+        return app
+
+    def _insert_photo(self, app, name: str, width: int, height: int, sha: str) -> int:
+        path = self.tmp_dir / name
+        Image.new("RGB", (16, 16), (10, 20, 30)).save(path)
+        return app.db.upsert_photo(str(path), 1000, 1.0, width, height, sha, 0, None)
+
+    def _make_group(self, app, prefix: str, sha: str):
+        """Groupe exact de 3 photos : un keeper (resolution la plus haute) et
+        deux doublons. Retourne (group, keeper_id, [dup_ids])."""
+        keeper_id = self._insert_photo(app, f"{prefix}_keeper.jpg", 4000, 3000, sha)
+        dup1 = self._insert_photo(app, f"{prefix}_dup1.jpg", 800, 600, sha)
+        dup2 = self._insert_photo(app, f"{prefix}_dup2.jpg", 640, 480, sha)
+        ids = [keeper_id, dup1, dup2]
+        group = grouping.PhotoGroup(kind="exact", photo_ids=sorted(ids), max_distance=0)
+        # suggest_keeper doit bien designer la plus haute resolution.
+        photos = [app.db.get_photo(pid) for pid in ids]
+        self.assertEqual(grouping.suggest_keeper(photos), keeper_id)
+        return group, keeper_id, [dup1, dup2]
+
+    def test_selection_buttons_exist_and_are_wired(self):
+        app = self._make_app()
+        self.assertEqual(app.select_dupes_button.cget("text"), "Cocher les doublons (sauf ★)")
+        self.assertEqual(app.select_dupes_all_button.cget("text"), "... dans tous les groupes")
+
+    def test_checks_all_duplicates_except_keeper_in_current_group(self):
+        app = self._make_app()
+        group, keeper_id, dup_ids = self._make_group(app, "g", "sha-a")
+        app._show_group_detail(group)
+        self.root.update()
+        # L'utilisateur a decoche toutes les cases a la main.
+        for var in app._checkbox_vars.values():
+            var.set(False)
+
+        app._check_duplicates_except_keeper(all_groups=False)
+
+        self.assertFalse(app._checkbox_vars[keeper_id].get(), "le keeper ne doit jamais etre coche")
+        for dup in dup_ids:
+            self.assertTrue(app._checkbox_vars[dup].get(), "chaque doublon doit etre coche")
+
+    def test_keeper_is_unchecked_even_if_it_was_checked_before(self):
+        app = self._make_app()
+        group, keeper_id, _ = self._make_group(app, "g", "sha-a")
+        app._show_group_detail(group)
+        self.root.update()
+        # Cas limite : le keeper avait ete coche a la main.
+        app._checkbox_vars[keeper_id].set(True)
+
+        app._check_duplicates_except_keeper(all_groups=False)
+
+        self.assertFalse(app._checkbox_vars[keeper_id].get())
+        self.assertNotIn(keeper_id, app._marked_ids)
+
+    def test_all_groups_scope_marks_every_non_keeper_across_groups(self):
+        app = self._make_app()
+        group_a, keeper_a, dups_a = self._make_group(app, "a", "sha-a")
+        group_b, keeper_b, dups_b = self._make_group(app, "b", "sha-b")
+        app._apply_groups([group_a, group_b])
+        # On affiche le groupe A puis on coche tout SAUF le keeper, partout.
+        app._show_group_detail(group_a)
+        self.root.update()
+
+        app._check_duplicates_except_keeper(all_groups=True)
+
+        self.assertEqual(app._marked_ids, set(dups_a) | set(dups_b))
+        self.assertNotIn(keeper_a, app._marked_ids)
+        self.assertNotIn(keeper_b, app._marked_ids)
+        # Le groupe affiche reflete visuellement la selection.
+        self.assertFalse(app._checkbox_vars[keeper_a].get())
+        for dup in dups_a:
+            self.assertTrue(app._checkbox_vars[dup].get())
+        # Les doublons du groupe B (non affiche, sans BooleanVar en memoire)
+        # sont ceux que _move_checked_photos ajoutera via checked_hidden.
+        for dup in dups_b:
+            self.assertNotIn(dup, app._checkbox_vars)
+
+    def test_new_grouping_clears_previous_all_groups_selection(self):
+        app = self._make_app()
+        group_a, _, dups_a = self._make_group(app, "a", "sha-a")
+        app._apply_groups([group_a])
+        app._show_group_detail(group_a)
+        app._check_duplicates_except_keeper(all_groups=True)
+        self.assertEqual(app._marked_ids, set(dups_a))
+
+        # Un nouveau calcul de groupes invalide toute selection precedente.
+        app._apply_groups([group_a])
+        self.assertEqual(app._marked_ids, set())
+
+
 if __name__ == "__main__":
     unittest.main()
