@@ -1,16 +1,14 @@
 """Fenêtre de contact commune aux applications Open Projects Lab.
 
 But : un point de contact intégré (bug / suggestion / question) dans chaque
-appli, DESTINÉ à être relié plus tard au panneau de gestion Filonaut. Tant que
-ce lien n'existe pas, RIEN n'est envoyé sur le réseau : le message est
-enregistré localement dans une « boîte d'envoi » (outbox JSONL), et
-l'utilisateur en est informé honnêtement.
+appli, relié au micro-service contact-intake (POST JSON).
 
-CE QU'IL RESTE À BRANCHER quand le panneau Filonaut sera reconstruit :
-UNIQUEMENT `FILONAUT_CONTACT_URL` + `_poster_filonaut()` ci-dessous. Tant que
-l'URL vaut None, aucun code réseau n'est exécuté — c'est volontaire (demande
-explicite du 2026-08-10 : ne pas relier avant reconstruction du panneau). La
-boîte d'envoi locale conserve les messages pour un envoi différé ultérieur.
+EN LIGNE depuis le 2026-08-10 : le message est envoyé à
+`https://contact.openprojectslab.com/api/contact` (URL de prod par défaut, cf.
+FILONAUT_CONTACT_URL plus bas ; override possible via OPL_CONTACT_URL). En cas
+d'échec réseau — ou si l'URL est vidée — repli automatique sur une « boîte
+d'envoi » locale (outbox JSONL) : AUCUN message n'est jamais perdu, et
+l'utilisateur en est informé honnêtement.
 
 Module stdlib-only, vendored à la racine de chaque dépôt à côté de opl_theme.py.
 """
@@ -21,6 +19,7 @@ import os
 import platform
 import sys
 import tkinter as tk
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from tkinter import ttk
@@ -31,23 +30,47 @@ except Exception:  # pragma: no cover
     opl_theme = None
 
 # ---------------------------------------------------------------------------
-# LE SEUL POINT À BRANCHER PLUS TARD.
-# Laisser None tant que le panneau Filonaut n'est pas reconstruit : à None,
-# _poster_filonaut n'est jamais appelée et rien ne part sur le réseau.
-FILONAUT_CONTACT_URL: str | None = None
+# Endpoint du service contact — EN PRODUCTION depuis le 2026-08-10.
+# L'URL de prod est le défaut (indispensable : une app distribuée en .exe n'a pas
+# de variable d'environnement). OPL_CONTACT_URL reste un override pour le dev/test.
+# Passer à "" (chaîne vide) désactiverait l'envoi -> repli boîte d'envoi locale.
+FILONAUT_CONTACT_URL: str | None = (
+    os.environ.get("OPL_CONTACT_URL", "").strip()
+    or "https://contact.openprojectslab.com/api/contact"
+)
+
+# Délai réseau court : le contact ne doit jamais figer l'appli.
+_TIMEOUT_S = 8
 
 
 def _poster_filonaut(payload: dict) -> None:
-    """À IMPLÉMENTER quand le panneau Filonaut sera prêt : envoyer `payload`
-    (forme ci-dessous) vers FILONAUT_CONTACT_URL. Volontairement AUCUN code
-    réseau ici pour l'instant — voir l'en-tête du module.
+    """Envoie `payload` vers FILONAUT_CONTACT_URL (POST JSON, stdlib). Lève sur
+    échec — ce qui déclenche le repli boîte d'envoi locale dans ouvrir().
 
-    payload = {
-        "app": str, "version": str, "type": str, "email": str,
-        "message": str, "os": str, "horodatage": str (ISO 8601 UTC),
-    }
+    Le schéma interne (app/type/…) est mappé vers celui du micro-service
+    contact-intake : { message, email, produit, version, os }. Le type de
+    demande est préfixé au message pour ne rien perdre (le service n'a pas de
+    champ « type » dédié).
     """
-    raise NotImplementedError("Lien Filonaut non branché (voir opl_contact.py)")
+    if not FILONAUT_CONTACT_URL:
+        raise RuntimeError("URL de contact non configurée")
+    type_ = str(payload.get("type", "")).strip()
+    message = payload.get("message", "")
+    corps = json.dumps({
+        "message": (f"[{type_}] {message}" if type_ else message),
+        "email": payload.get("email", ""),
+        "produit": payload.get("app", ""),
+        "version": payload.get("version", ""),
+        "os": payload.get("os", ""),
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        FILONAUT_CONTACT_URL, data=corps, method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=_TIMEOUT_S) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+    if not data.get("ok"):
+        raise RuntimeError(data.get("error", "refus du serveur"))
 
 
 TYPES = ["Signaler un bug", "Suggestion d'amélioration", "Question", "Autre"]
