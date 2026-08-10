@@ -36,6 +36,8 @@ from PIL import ImageTk
 import grouping
 import hashing
 import scanner
+import opl_theme
+import opl_contact
 import update_checker
 from db import Database, phash_from_sqlite
 
@@ -220,7 +222,7 @@ class PhotoTriApp:
         self.root.title(APP_TITLE)
         self.root.geometry("1150x720")
         self.root.minsize(850, 550)
-        ttk.Style(self.root).theme_use("alt")
+        opl_theme.apply(self.root, "PhotoTri")
 
         icon_path = _resource_path("icon.ico")
         if icon_path.exists():
@@ -304,6 +306,8 @@ class PhotoTriApp:
     # -- construction de l'interface ---------------------------------------------
 
     def _build_layout(self):
+        opl_theme.entete(self.root, "PhotoTri", "Detecteur de photos en double", on_contact=lambda: opl_contact.ouvrir(self.root, app="PhotoTri", version=APP_VERSION)).pack(fill=X)
+
         top = ttk.Frame(self.root)
         top.pack(fill=X, padx=10, pady=10)
         self.top_frame = top
@@ -338,7 +342,7 @@ class PhotoTriApp:
         threshold_spinbox.pack(side=LEFT, padx=(4, 10))
         self.recompute_button = ttk.Button(right_controls, text="Recalculer les groupes", command=self._refresh_groups)
         self.recompute_button.pack(side=LEFT, padx=(0, 10))
-        self.scan_button = ttk.Button(right_controls, text="Analyser (scanner)", command=self._start_scan, state="disabled")
+        self.scan_button = ttk.Button(right_controls, text="Analyser (scanner)", command=self._start_scan, state="disabled", style="Accent.TButton")
         self.scan_button.pack(side=LEFT)
         self.stop_button = ttk.Button(right_controls, text="Arreter", command=self._request_stop, state="disabled")
         self.stop_button.pack(side=LEFT, padx=(6, 0))
