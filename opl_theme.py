@@ -50,6 +50,7 @@ from __future__ import annotations
 import os
 import sys
 import tkinter as tk
+import webbrowser
 from pathlib import Path
 from tkinter import ttk
 
@@ -588,12 +589,43 @@ def apply(root: tk.Misc, nom_appli: str = "", *, base: str = "clam", mode=None) 
     return style
 
 
+# ---------------------------------------------------------------------------
+# Les pages du site vers lesquelles le menu Aide renvoie. Chemins FRANÇAIS,
+# recopiés de site/src/i18n/index.ts (ROUTES) et du préfixe des fiches
+# (PREFIXE_LOGICIEL) d'Open Projects Lab : un renommage de route là-bas doit
+# être reporté ici — les sept applications installées ne peuvent pas lire la
+# table du site à l'exécution. Aucune page « /docs/<app> » n'existe : la FICHE
+# du logiciel tient ce rôle (guide, notes de version, téléchargement vérifié).
+SITE = "https://openprojectslab.com"
+AIDE = {
+    "fiche": "/logiciels/{slug}/",
+    "glossaire": "/glossaire/",
+    "communaute": "/communaute/",
+}
+
+
+def url_aide(cle: str, slug: str = "") -> str:
+    return SITE + AIDE[cle].format(slug=slug)
+
+
 def entete(parent: tk.Misc, nom_appli: str, accroche: str = "", *,
-           badge: str = "OPEN PROJECTS LAB", on_contact=None) -> ttk.Frame:
+           badge: str = "OPEN PROJECTS LAB", on_contact=None,
+           slug: str | None = None, version: str = "") -> ttk.Frame:
     """Bandeau de marque à empaqueter en haut de la fenêtre (fill='x').
 
     `on_contact` : si fourni (callable sans argument), ajoute un lien « Contact »
     cliquable à droite du bandeau — typiquement `lambda: opl_contact.ouvrir(...)`.
+
+    `slug` : si fourni, ajoute un lien « Aide » qui déroule un petit menu vers
+    la fiche du logiciel sur le site, le glossaire et la communauté — plus
+    « Signaler un problème » (le contact) et une ligne « À propos ». Le menu est
+    exposé en `cadre.menu_aide` (None sans slug), pour les tests.
+
+    POURQUOI UN MENU, ET POURQUOI ICI. Les sept applications n'ont aucune barre
+    de menus : l'aide n'avait aucun point d'entrée, et l'existence même du
+    glossaire ou de la page Communauté restait invisible depuis le logiciel.
+    Le bandeau est le seul chrome commun aux sept — un lien de plus ici, c'est
+    une ligne changée dans chaque gui.py, et le même comportement partout.
     """
     cadre = ttk.Frame(parent, style="Entete.TFrame", padding=(20, 14))
     ligne = ttk.Frame(cadre, style="Entete.TFrame")
@@ -622,6 +654,33 @@ def entete(parent: tk.Misc, nom_appli: str, accroche: str = "", *,
           lambda: basculer(parent))
     if on_contact is not None:
         _lien("✉  Contact", on_contact)
+
+    cadre.menu_aide = None
+    if slug:
+        menu = tk.Menu(parent, tearoff=0)
+        menu.add_command(label="Guide, notes de version et téléchargement",
+                         command=lambda: webbrowser.open(url_aide("fiche", slug)))
+        menu.add_command(label="Glossaire — les mots techniques expliqués",
+                         command=lambda: webbrowser.open(url_aide("glossaire")))
+        menu.add_command(label="Communauté — chat, idées, entraide",
+                         command=lambda: webbrowser.open(url_aide("communaute")))
+        if on_contact is not None:
+            menu.add_separator()
+            menu.add_command(label="Signaler un problème…", command=on_contact)
+        menu.add_separator()
+        # Une ligne d'information, pas une action : la version, et la licence —
+        # « libre » est une promesse que l'utilisateur doit pouvoir lire ici.
+        menu.add_command(label=f"{nom_appli} v{version or '?'} — logiciel libre, licence MIT", state="disabled")
+
+        def derouler(lab):
+            try:
+                menu.tk_popup(lab.winfo_rootx(), lab.winfo_rooty() + lab.winfo_height())
+            finally:
+                menu.grab_release()
+
+        lien_aide = _lien("?  Aide", lambda: None)
+        lien_aide.bind("<Button-1>", lambda _e: derouler(lien_aide))
+        cadre.menu_aide = menu
     return cadre
 
 

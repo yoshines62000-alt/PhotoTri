@@ -319,7 +319,7 @@ class PhotoTriApp:
     # -- construction de l'interface ---------------------------------------------
 
     def _build_layout(self):
-        opl_theme.entete(self.root, "PhotoTri", "Detecteur de photos en double", on_contact=lambda: opl_contact.ouvrir(self.root, app="PhotoTri", version=APP_VERSION)).pack(fill=X)
+        opl_theme.entete(self.root, "PhotoTri", "Detecteur de photos en double", on_contact=lambda: opl_contact.ouvrir(self.root, app="PhotoTri", version=APP_VERSION), slug="phototri", version=APP_VERSION).pack(fill=X)
 
         top = ttk.Frame(self.root)
         top.pack(fill=X, padx=10, pady=10)
