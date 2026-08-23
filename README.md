@@ -99,6 +99,27 @@ python -m pip install -r requirements.txt
   emplacement d'origine (ou dans le dossier de révision que vous avez
   choisi) tant que vous ne les déplacez pas vous-même.
 
+## Mes données — si l'application ne se lance plus
+
+Tout est rangé dans un seul fichier SQLite (`phototri.sqlite`), un format public que
+Python sait lire sans rien installer. Si un jour l'exécutable refuse de démarrer
+— Windows qui bloque, un antivirus, une machine changée —, vos données restent
+récupérables :
+
+```bash
+python secours_donnees.py "%APPDATA%\PhotoTri\phototri.sqlite" --dossier export
+```
+
+Cela écrit, dans le dossier `export`, **un CSV par table** (ouvrable dans un
+tableur) et un `donnees.json` de l'ensemble. Le fichier d'origine est ouvert
+**en lecture seule** : il n'est jamais modifié. Le script n'utilise que la
+bibliothèque standard de Python, et un test le prouve sur une vraie base
+(`tests/test_secours_donnees.py`).
+
+Le script ne connaît pas le sens des colonnes — c'est l'application qui le
+connaît — : il exporte toutes les tables telles quelles, à vous d'y retrouver
+les vôtres.
+
 ## Créer un exécutable autonome (.exe)
 
 Pour distribuer l'outil sans que le destinataire ait besoin d'installer
