@@ -432,7 +432,12 @@ class PhotoTriApp:
         if status == "update_available":
             self.update_status_var.set(f"Mise a jour disponible : {tag} - Telecharger")
             self.update_status_label.configure(foreground=opl_theme.couleur("lien"), cursor="hand2")
-            self.update_status_label.bind("<Button-1>", lambda event: webbrowser.open(RELEASES_URL))
+            # Le clic : si la verification est passee par le flux d'Open Projects
+            # Lab, le binaire est telecharge ICI et son empreinte SHA-256 verifiee
+            # avant d'etre montre (jamais execute) ; sinon, la page GitHub comme
+            # avant. Tout vit dans update_checker, identique dans les sept apps.
+            self.update_status_label.bind("<Button-1>", lambda event: update_checker.ouvrir_mise_a_jour(
+                UPDATE_REPO, RELEASES_URL, self.update_status_var, self.root.after))
         elif status == "up_to_date":
             self.update_status_var.set("A jour")
             self.update_status_label.configure(foreground=opl_theme.couleur("succes"), cursor="")

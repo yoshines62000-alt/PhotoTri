@@ -1,4 +1,5 @@
 """Verification de mise a jour : le flux d'Open Projects Lab d'abord, GitHub en repli.
+Et, quand le flux a repondu, TELECHARGEMENT VERIFIE du binaire par l'empreinte.
 
 Toujours execute en arriere-plan (voir start_update_check) : une verification
 ratee (pas de connexion, serveur inaccessible...) ne doit JAMAIS empecher
@@ -17,28 +18,58 @@ version en croyant etre a jour.
 publication depuis les releases GitHub, servi en fichier statique, sans quota,
 et son contrat est fige (on y ajoute des champs, on n'en retire jamais - voir
 l'ADR 009 d'Open Projects Lab). Il porte aussi la taille et l'empreinte SHA-256
-du binaire, pour la suite.
+du binaire.
 
 Le repli sur GitHub reste : si le flux est injoignable, illisible, d'un schema
 inconnu, ou ne connait pas cette application, on fait exactement ce qu'on
-faisait avant. Rien n'est perdu par rapport a l'ancien comportement, et les
-deux chemins aboutissent au meme resultat : le tag de la derniere release.
+faisait avant. Rien n'est perdu par rapport a l'ancien comportement.
 
-CE QUI EST ENVOYE : une requete GET, sans aucune donnee, vers le site d'Open
-Projects Lab (et, en repli seulement, vers l'API GitHub). Aucune information
-sur la machine n'est transmise au-dela de ce que toute requete HTTP contient.
+POURQUOI TELECHARGER ICI PLUTOT QUE D'OUVRIR LA PAGE GITHUB
+-----------------------------------------------------------
+Avant, « Telecharger » ouvrait la page des releases dans le navigateur ; la
+verification de l'empreinte SHA-256 etait laissee a l'utilisateur — qui ne la
+faisait pas. Quand le flux a repondu, on connait l'adresse du binaire, sa
+taille et son empreinte : on peut donc le telecharger NOUS-MEMES, calculer
+l'empreinte au fil de l'eau, et REFUSER le fichier si elle differe. Un
+telechargement verifie par le programme vaut mieux qu'une consigne que
+personne ne suit.
+
+Trois limites, tenues par le code :
+  - on ne telecharge que depuis https://github.com/... : un flux compromis ne
+    fera pas chercher un binaire ailleurs ;
+  - un fichier dont l'empreinte ou la taille differe est SUPPRIME, et on le dit ;
+    on n'ouvre rien, on ne propose pas de l'executer quand meme ;
+  - le fichier telecharge n'est JAMAIS execute par ce module : il est depose
+    dans le dossier Telechargements, le dossier est ouvert, l'utilisateur
+    decide. Sans flux (repli GitHub), on ouvre la page comme avant.
+
+CE QUI EST ENVOYE : des requetes GET, sans aucune donnee, vers le site d'Open
+Projects Lab et vers GitHub. Aucune information sur la machine n'est transmise
+au-dela de ce que toute requete HTTP contient.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import queue
 import re
 import threading
 import urllib.error
+import urllib.parse
 import urllib.request
+import webbrowser
+from pathlib import Path
 
 REQUEST_TIMEOUT_SECONDS = 5
+#: Delai entre deux lectures pendant un telechargement (pas un delai total : un
+#: binaire de 16 Mo sur une connexion lente a le droit de prendre son temps,
+#: une connexion qui ne repond plus pendant 30 s n'a pas le droit de bloquer).
+DOWNLOAD_TIMEOUT_SECONDS = 30
+#: Taille des morceaux lus : assez gros pour ne pas ralentir, assez petit pour
+#: que l'empreinte se calcule au fil de l'eau sans tout garder en memoire.
+TAILLE_MORCEAU = 64 * 1024
 
 #: Le flux d'Open Projects Lab. Chemin FIGE (ADR 009) : une rupture s'appellerait
 #: /api/v2/ et /api/v1/ continuerait d'etre servi.
@@ -46,8 +77,23 @@ FLUX_URL = "https://openprojectslab.com/api/v1/versions.json"
 #: La version du SCHEMA que ce module sait lire. Un flux qui en annonce une
 #: autre est refuse - on ne devine pas ce qu'on ne sait pas lire, on se replie.
 FLUX_SCHEMA = 1
+#: Les seuls hotes depuis lesquels un binaire peut etre telecharge. Les sept
+#: applications sont publiees sur GitHub ; un flux qui designerait une autre
+#: adresse serait un flux compromis, pas une nouveaute.
+HOTES_AUTORISES = ("github.com", "objects.githubusercontent.com")
 
 _ERREURS_RESEAU = (urllib.error.URLError, TimeoutError, ValueError, OSError)
+
+#: L'entree du flux obtenue lors de la derniere verification, par depot. C'est
+#: ce qui permet au clic « Telecharger » de savoir QUOI telecharger et QUELLE
+#: empreinte attendre. None (ou absent) = la verification est passee par GitHub,
+#: on n'a qu'un tag : le clic ouvre la page comme avant.
+_DERNIERE_ENTREE: dict = {}
+_TELECHARGEMENTS_EN_COURS: set = set()
+
+
+class TelechargementInvalide(Exception):
+    """Le fichier recu n'est pas celui annonce (empreinte, taille, adresse)."""
 
 
 def _parse_version(tag: str) -> tuple:
@@ -115,9 +161,13 @@ def fetch_latest_release_tag(repo: str, timeout: float = REQUEST_TIMEOUT_SECONDS
     si les DEUX chemins echouent. Le flux d'abord ; GitHub si le flux ne
     repond pas pour cette application.
 
+    Effet de bord voulu : l'entree du flux (ou None) est memorisee pour ce
+    depot, afin que le clic « Telecharger » sache quoi verifier.
+
     La signature et le resultat sont ceux d'avant la bascule : gui.py et les
     tests qui patchent cette fonction n'ont rien a savoir du flux."""
     entree = fetch_from_flux(repo, timeout)
+    _DERNIERE_ENTREE[repo] = entree
     if entree is not None:
         return entree["etiquette"]
     return fetch_from_github(repo, timeout)
@@ -140,3 +190,153 @@ def start_update_check(current_version: str, repo: str, result_queue: "queue.Que
             result_queue.put(("up_to_date", tag))
 
     threading.Thread(target=worker, daemon=True).start()
+
+
+# --- telechargement verifie -------------------------------------------------
+
+def dossier_telechargements() -> Path:
+    """Le dossier Telechargements de l'utilisateur - son nom physique est
+    « Downloads » quelle que soit la langue de Windows. A defaut, le dossier
+    personnel : on ne cree pas de dossier chez l'utilisateur sans le lui dire."""
+    candidat = Path.home() / "Downloads"
+    return candidat if candidat.is_dir() else Path.home()
+
+
+def _verifier_binaire_annonce(entree: dict) -> tuple:
+    """Extrait (url, nom, taille, sha256) de l'entree du flux, ou leve
+    TelechargementInvalide si l'un des quatre ne convient pas. On REFUSE avant
+    la moindre requete : une adresse hors GitHub, une empreinte qui n'en est
+    pas une, une taille absurde - rien de tout cela ne merite un octet."""
+    binaire = entree.get("binaire") if isinstance(entree, dict) else None
+    if not isinstance(binaire, dict):
+        raise TelechargementInvalide("le flux ne decrit aucun binaire")
+    url, nom = binaire.get("url"), binaire.get("nom")
+    taille, sha = binaire.get("taille_octets"), binaire.get("sha256")
+    if not isinstance(url, str) or not isinstance(nom, str) or not nom:
+        raise TelechargementInvalide("adresse ou nom de fichier manquant")
+    parties = urllib.parse.urlsplit(url)
+    if parties.scheme != "https" or (parties.hostname or "").lower() not in HOTES_AUTORISES:
+        raise TelechargementInvalide(f"adresse refusee : {url}")
+    if not isinstance(taille, int) or isinstance(taille, bool) or taille <= 0:
+        raise TelechargementInvalide("taille annoncee absente ou absurde")
+    if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", sha):
+        raise TelechargementInvalide("empreinte SHA-256 annoncee invalide")
+    # Le nom vient du flux : on n'en garde que la derniere composante, jamais
+    # un chemin - `../` dans un nom de fichier n'a rien a faire ici.
+    return url, Path(nom).name, taille, sha.lower()
+
+
+def _chemin_libre(dossier: Path, nom: str, sha: str) -> Path:
+    """`nom`, ou `nom (2)`, `nom (3)`... si un AUTRE fichier porte deja ce nom.
+    Un fichier identique (meme empreinte) est reutilise tel quel."""
+    cible = dossier / nom
+    n = 1
+    while cible.exists():
+        if _sha256_de(cible) == sha:
+            return cible
+        n += 1
+        cible = dossier / f"{Path(nom).stem} ({n}){Path(nom).suffix}"
+    return cible
+
+
+def _sha256_de(chemin: Path) -> str:
+    h = hashlib.sha256()
+    with open(chemin, "rb") as f:
+        for morceau in iter(lambda: f.read(TAILLE_MORCEAU), b""):
+            h.update(morceau)
+    return h.hexdigest()
+
+
+def telecharger_et_verifier(entree: dict, dossier: Path | None = None,
+                            timeout: float = DOWNLOAD_TIMEOUT_SECONDS) -> Path:
+    """Telecharge le binaire decrit par `entree` dans `dossier`, en calculant
+    l'empreinte SHA-256 au fil de l'eau, et ne le garde QUE si taille et
+    empreinte sont exactement celles annoncees. Renvoie le chemin du fichier.
+
+    Leve TelechargementInvalide (fichier partiel supprime) si quoi que ce soit
+    differe, et laisse remonter les erreurs reseau. Ne lance jamais le fichier."""
+    url, nom, taille, sha = _verifier_binaire_annonce(entree)
+    dossier = Path(dossier) if dossier is not None else dossier_telechargements()
+    final = _chemin_libre(dossier, nom, sha)
+    if final.exists():        # deja la, deja verifie par _chemin_libre
+        return final
+    partiel = dossier / (nom + ".partiel")
+    h = hashlib.sha256()
+    recu = 0
+    request = urllib.request.Request(url, headers={"User-Agent": f"{slug_de(url)} update-checker"})
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as reponse, open(partiel, "wb") as sortie:
+            for morceau in iter(lambda: reponse.read(TAILLE_MORCEAU), b""):
+                recu += len(morceau)
+                if recu > taille:
+                    # Plus gros qu'annonce : inutile d'attendre la fin pour savoir
+                    # que ce n'est pas le bon fichier.
+                    raise TelechargementInvalide(f"plus gros qu'annonce ({taille} octets)")
+                h.update(morceau)
+                sortie.write(morceau)
+        if recu != taille:
+            raise TelechargementInvalide(f"taille recue {recu}, annoncee {taille}")
+        if h.hexdigest() != sha:
+            raise TelechargementInvalide("l'empreinte SHA-256 du fichier recu differe de celle annoncee")
+    except BaseException:
+        try:
+            partiel.unlink()
+        except OSError:
+            pass
+        raise
+    os.replace(partiel, final)
+    return final
+
+
+def ouvrir_mise_a_jour(repo: str, releases_url: str, var, planifier, dossier: Path | None = None):
+    """Ce que fait le clic sur « Telecharger » :
+      - si la derniere verification est passee par le FLUX : telecharge le
+        binaire en arriere-plan, verifie son empreinte, ouvre le dossier ;
+      - sinon (repli GitHub, aucune empreinte connue) : ouvre la page des
+        releases, comme avant.
+
+    `var` est la StringVar du libelle d'etat, `planifier` la fonction
+    `root.after` de l'application : tout ce qui touche a Tk passe par elle,
+    depuis le thread principal. Renvoie le thread lance (ou None), pour les
+    tests. Un second clic pendant un telechargement ne relance rien."""
+    entree = _DERNIERE_ENTREE.get(repo)
+    if not entree:
+        webbrowser.open(releases_url)
+        return None
+    if repo in _TELECHARGEMENTS_EN_COURS:
+        return None
+    _TELECHARGEMENTS_EN_COURS.add(repo)
+    nom = Path(str((entree.get("binaire") or {}).get("nom") or "fichier")).name
+
+    def dire(texte: str) -> None:
+        planifier(0, lambda: var.set(texte))
+
+    def worker():
+        try:
+            dire(f"Telechargement de {nom}... (empreinte verifiee a l'arrivee)")
+            chemin = telecharger_et_verifier(entree, dossier)
+        except TelechargementInvalide as exc:
+            # Le fichier n'est PAS celui annonce : il est supprime, on le dit,
+            # on n'ouvre rien. Le clic suivant reprend l'ancien chemin (la page
+            # GitHub) plutot que de retenter un fichier qu'on vient de refuser.
+            _DERNIERE_ENTREE[repo] = None
+            dire(f"Telechargement refuse : {exc}. Fichier supprime. Cliquer pour ouvrir la page GitHub.")
+        except _ERREURS_RESEAU as exc:
+            dire(f"Telechargement impossible ({exc.__class__.__name__}). Cliquer pour reessayer.")
+        else:
+            dire(f"Telecharge et verifie : {chemin.name} (dossier {chemin.parent})")
+            # Le dossier, pas le fichier : on montre, on n'execute pas.
+            planifier(0, lambda: _ouvrir_dossier(chemin.parent))
+        finally:
+            _TELECHARGEMENTS_EN_COURS.discard(repo)
+
+    fil = threading.Thread(target=worker, daemon=True)
+    fil.start()
+    return fil
+
+
+def _ouvrir_dossier(dossier: Path) -> None:
+    try:
+        os.startfile(str(dossier))          # Windows : l'explorateur sur le dossier
+    except (AttributeError, OSError):
+        webbrowser.open(dossier.as_uri())    # ailleurs, ou si l'explorateur refuse
