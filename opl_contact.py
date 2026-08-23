@@ -10,6 +10,16 @@ d'échec réseau — ou si l'URL est vidée — repli automatique sur une « bo�
 d'envoi » locale (outbox JSONL) : AUCUN message n'est jamais perdu, et
 l'utilisateur en est informé honnêtement.
 
+ON MONTRE EXACTEMENT CE QUI PART, AVANT QUE ÇA PARTE (depuis le 2026-08-23)
+---------------------------------------------------------------------------
+Avant, « Envoyer » envoyait. Une ligne disait « Joint automatiquement : app,
+OS » — mais ni la destination, ni le corps exact, ni ce qui n'est PAS envoyé.
+Désormais « Envoyer » ouvre d'abord un aperçu : l'adresse de destination, le
+corps JSON tel qu'il sera transmis (le MÊME objet, sérialisé — pas une copie
+qui pourrait diverger), et ce que le serveur fait de la requête. Rien ne part
+tant que l'utilisateur n'a pas cliqué « Envoyer tel quel ». Un bouton qui
+envoie sans montrer demande une confiance qu'il n'a pas gagnée.
+
 Module stdlib-only, vendored à la racine de chaque dépôt à côté de opl_theme.py.
 """
 from __future__ import annotations
@@ -17,6 +27,7 @@ from __future__ import annotations
 import json
 import os
 import platform
+import re
 import sys
 import tkinter as tk
 import urllib.request
@@ -42,36 +53,13 @@ FILONAUT_CONTACT_URL: str | None = (
 # Délai réseau court : le contact ne doit jamais figer l'appli.
 _TIMEOUT_S = 8
 
-
-def _poster_filonaut(payload: dict) -> None:
-    """Envoie `payload` vers FILONAUT_CONTACT_URL (POST JSON, stdlib). Lève sur
-    échec — ce qui déclenche le repli boîte d'envoi locale dans ouvrir().
-
-    Le schéma interne (app/type/…) est mappé vers celui du micro-service
-    contact-intake : { message, email, produit, version, os }. Le type de
-    demande est préfixé au message pour ne rien perdre (le service n'a pas de
-    champ « type » dédié).
-    """
-    if not FILONAUT_CONTACT_URL:
-        raise RuntimeError("URL de contact non configurée")
-    type_ = str(payload.get("type", "")).strip()
-    message = payload.get("message", "")
-    corps = json.dumps({
-        "message": (f"[{type_}] {message}" if type_ else message),
-        "email": payload.get("email", ""),
-        "produit": payload.get("app", ""),
-        "version": payload.get("version", ""),
-        "os": payload.get("os", ""),
-    }).encode("utf-8")
-    req = urllib.request.Request(
-        FILONAUT_CONTACT_URL, data=corps, method="POST",
-        headers={"Content-Type": "application/json"},
-    )
-    with urllib.request.urlopen(req, timeout=_TIMEOUT_S) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
-    if not data.get("ok"):
-        raise RuntimeError(data.get("error", "refus du serveur"))
-
+# Les limites du service contact-intake (config.js, maxLen), recopiées ICI pour
+# refuser AVANT d'envoyer ce que le serveur refuserait après — un message de
+# 6 000 caractères mérite d'être prévenu avant le clic, pas après. Le serveur
+# tronque produit/version/os sans rejeter ; il REJETTE un message vide ou trop
+# long, et un e-mail non vide mal formé (même expression que la sienne).
+LIMITES = {"message": 5000, "email": 200, "produit": 80, "version": 40, "os": 120}
+_EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
 TYPES = ["Signaler un bug", "Suggestion d'amélioration", "Question", "Autre"]
 
@@ -85,6 +73,8 @@ def _outbox(app: str) -> Path:
 
 
 def _payload(app: str, version: str, type_: str, email: str, message: str) -> dict:
+    """Ce que l'application SAIT du message (avec le type et l'horodatage, pour
+    la boîte d'envoi locale). Ce n'est PAS ce qui est envoyé : voir corps_envoye."""
     return {
         "app": app,
         "version": version,
@@ -96,6 +86,78 @@ def _payload(app: str, version: str, type_: str, email: str, message: str) -> di
     }
 
 
+def corps_envoye(payload: dict) -> dict:
+    """Le corps JSON EXACT transmis au service — cinq champs, pas un de plus.
+
+    Le schéma interne (app/type/horodatage) est mappé vers celui du service :
+    { message, email, produit, version, os }. Le type est préfixé au message
+    (le service n'a pas de champ « type »). L'horodatage NE PART PAS : le
+    serveur date lui-même la réception. C'est ce dict, et lui seul, que
+    l'aperçu montre et que _poster_corps sérialise."""
+    type_ = str(payload.get("type", "")).strip()
+    message = str(payload.get("message", "")).strip()
+    # Pas de préfixe sur un message VIDE : « [Signaler un bug] » tout seul
+    # n'est pas vide aux yeux de verifier(), et l'aperçu s'ouvrait sur rien.
+    # Trouvé par le test, pas par relecture.
+    return {
+        "message": (f"[{type_}] {message}" if type_ and message else message),
+        "email": str(payload.get("email", "")).strip(),
+        "produit": str(payload.get("app", "")),
+        "version": str(payload.get("version", "")),
+        "os": str(payload.get("os", "")),
+    }
+
+
+def verifier(corps: dict) -> str | None:
+    """La première raison pour laquelle le service refuserait ce corps, ou None.
+    Même règles que contact-intake : on ne fait pas voyager un refus."""
+    if not corps.get("message", "").strip():
+        return "Merci d'écrire un message avant d'envoyer."
+    if len(corps["message"]) > LIMITES["message"]:
+        return f"Message trop long : {len(corps['message'])} caractères, maximum {LIMITES['message']}."
+    email = corps.get("email", "")
+    if email and (len(email) > LIMITES["email"] or not _EMAIL_RE.match(email)):
+        return "L'adresse e-mail n'a pas l'air valide (laissez-la vide si vous ne voulez pas de réponse)."
+    return None
+
+
+def apercu(corps: dict, url: str | None, outbox: Path | None = None) -> str:
+    """Le texte montré AVANT l'envoi : la destination, le corps exact, et ce
+    que le serveur fait de la requête. Honnête dans les deux sens — ce qui
+    part, et ce qui ne part pas."""
+    lignes = [f"Destination : {url or '(aucune — envoi désactivé, le message sera gardé sur cet ordinateur)'}", "",
+              "Corps envoyé, tel quel :", json.dumps(corps, ensure_ascii=False, indent=2), "",
+              "Rien d'autre n'est envoyé : pas d'identifiant de machine, pas de nom",
+              "d'utilisateur, pas de fichier, pas de contenu de l'application.", "",
+              "Votre adresse IP parvient au serveur, comme pour toute requête ; il n'en",
+              "garde qu'une empreinte tronquée (pour limiter les abus), pas l'adresse."]
+    if outbox is not None:
+        lignes += ["", f"Si l'envoi échoue, le message est gardé ici et n'est jamais renvoyé",
+                   f"automatiquement : {outbox}"]
+    return "\n".join(lignes)
+
+
+def _poster_corps(corps: dict) -> None:
+    """Envoie `corps` — le dict de corps_envoye, le même objet que l'aperçu —
+    vers FILONAUT_CONTACT_URL (POST JSON, stdlib). Lève sur échec, ce qui
+    déclenche le repli boîte d'envoi locale dans ouvrir()."""
+    if not FILONAUT_CONTACT_URL:
+        raise RuntimeError("URL de contact non configurée")
+    req = urllib.request.Request(
+        FILONAUT_CONTACT_URL, data=json.dumps(corps).encode("utf-8"), method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=_TIMEOUT_S) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+    if not data.get("ok"):
+        raise RuntimeError(data.get("error", "refus du serveur"))
+
+
+def _poster_filonaut(payload: dict) -> None:
+    """Compatibilité : l'ancien point d'entrée, qui passe par corps_envoye."""
+    _poster_corps(corps_envoye(payload))
+
+
 def _enregistrer_localement(app: str, payload: dict) -> Path:
     """Ajoute le message à la boîte d'envoi locale (une ligne JSON). Aucun
     réseau. Renvoie le chemin du fichier pour l'afficher à l'utilisateur."""
@@ -105,8 +167,10 @@ def _enregistrer_localement(app: str, payload: dict) -> Path:
     return chemin
 
 
-def ouvrir(parent: tk.Misc, *, app: str, version: str = "") -> None:
-    """Ouvre la fenêtre de contact modale, thémée comme le reste de l'appli."""
+def ouvrir(parent: tk.Misc, *, app: str, version: str = "") -> tk.Toplevel:
+    """Ouvre la fenêtre de contact modale, thémée comme le reste de l'appli.
+    Renvoie la fenêtre (ses boutons et son aperçu sont exposés comme attributs,
+    pour les tests : bouton_envoyer, bouton_confirmer, bouton_modifier, apercu)."""
     P = opl_theme.PALETTE if opl_theme else {
         "fond": "#F5F7FA", "surface": "#FFFFFF", "texte": "#16202E",
         "texte_doux": "#5A6B80", "emeraude_fonce": "#10B981", "danger": "#DC2626",
@@ -121,77 +185,124 @@ def ouvrir(parent: tk.Misc, *, app: str, version: str = "") -> None:
     except Exception:
         pass
 
-    cadre = ttk.Frame(win, padding=20)
-    cadre.pack(fill="both", expand=True)
-
     titre_style = "Titre.TLabel" if opl_theme else "TLabel"
     doux_style = "SousTitre.TLabel" if opl_theme else "TLabel"
-    ttk.Label(cadre, text="Nous contacter", style=titre_style).grid(row=0, column=0, columnspan=2, sticky="w")
-    ttk.Label(cadre, text="Bug, idée ou question — votre retour arrive directement à l'auteur.",
+    mono_style = "Mono.TLabel" if opl_theme else "TLabel"
+    style_envoyer = "Accent.TButton" if opl_theme else "TButton"
+
+    # Deux pages dans la même fenêtre : le FORMULAIRE, puis l'APERÇU. Seule
+    # la seconde envoie. On bascule par pack()/pack_forget(), rien n'est détruit.
+    formulaire = ttk.Frame(win, padding=20)
+    page_apercu = ttk.Frame(win, padding=20)
+    formulaire.pack(fill="both", expand=True)
+
+    # -- page 1 : le formulaire ------------------------------------------------
+    ttk.Label(formulaire, text="Nous contacter", style=titre_style).grid(row=0, column=0, columnspan=2, sticky="w")
+    ttk.Label(formulaire, text="Bug, idée ou question — votre retour arrive directement à l'auteur.",
               style=doux_style).grid(row=1, column=0, columnspan=2, sticky="w", pady=(2, 14))
 
-    ttk.Label(cadre, text="Type").grid(row=2, column=0, sticky="w", pady=(0, 2))
+    ttk.Label(formulaire, text="Type").grid(row=2, column=0, sticky="w", pady=(0, 2))
     type_var = tk.StringVar(value=TYPES[0])
-    combo = ttk.Combobox(cadre, textvariable=type_var, values=TYPES, state="readonly", width=34)
+    combo = ttk.Combobox(formulaire, textvariable=type_var, values=TYPES, state="readonly", width=34)
     combo.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(0, 10))
 
-    ttk.Label(cadre, text="Votre e-mail (optionnel, pour la réponse)").grid(row=4, column=0, sticky="w", pady=(0, 2))
+    ttk.Label(formulaire, text="Votre e-mail (optionnel, pour la réponse)").grid(row=4, column=0, sticky="w", pady=(0, 2))
     email_var = tk.StringVar()
-    ttk.Entry(cadre, textvariable=email_var, width=36).grid(row=5, column=0, columnspan=2, sticky="ew", pady=(0, 10))
+    ttk.Entry(formulaire, textvariable=email_var, width=36).grid(row=5, column=0, columnspan=2, sticky="ew", pady=(0, 10))
 
-    ttk.Label(cadre, text="Message").grid(row=6, column=0, sticky="w", pady=(0, 2))
-    txt = tk.Text(cadre, width=44, height=8, wrap="word")
+    ttk.Label(formulaire, text="Message").grid(row=6, column=0, sticky="w", pady=(0, 2))
+    txt = tk.Text(formulaire, width=44, height=8, wrap="word")
     txt.grid(row=7, column=0, columnspan=2, sticky="ew")
 
     meta = f"Joint automatiquement : {app} v{version} · {platform.system()} {platform.release()}"
-    ttk.Label(cadre, text=meta, style=("Mono.TLabel" if opl_theme else "TLabel")).grid(
-        row=8, column=0, columnspan=2, sticky="w", pady=(8, 14))
+    ttk.Label(formulaire, text=meta, style=mono_style).grid(row=8, column=0, columnspan=2, sticky="w", pady=(8, 14))
 
-    etat = ttk.Label(cadre, text="", style=doux_style)
+    etat = ttk.Label(formulaire, text="", style=doux_style)
     etat.grid(row=9, column=0, columnspan=2, sticky="w")
 
-    barre = ttk.Frame(cadre)
+    barre = ttk.Frame(formulaire)
     barre.grid(row=10, column=0, columnspan=2, sticky="e", pady=(10, 0))
+    formulaire.columnconfigure(0, weight=1)
+    formulaire.columnconfigure(1, weight=1)
+
+    # -- page 2 : l'aperçu -----------------------------------------------------
+    ttk.Label(page_apercu, text="Voici exactement ce qui sera envoyé", style=titre_style).grid(row=0, column=0, sticky="w")
+    ttk.Label(page_apercu, text="Rien ne part tant que vous n'avez pas cliqué « Envoyer tel quel ».",
+              style=doux_style).grid(row=1, column=0, sticky="w", pady=(2, 10))
+    zone = tk.Text(page_apercu, width=64, height=18, wrap="word")
+    zone.grid(row=2, column=0, sticky="ew")
+    etat_apercu = ttk.Label(page_apercu, text="", style=doux_style)
+    etat_apercu.grid(row=3, column=0, sticky="w", pady=(8, 0))
+    barre_apercu = ttk.Frame(page_apercu)
+    barre_apercu.grid(row=4, column=0, sticky="e", pady=(10, 0))
+    page_apercu.columnconfigure(0, weight=1)
+
+    en_attente: dict = {}   # le payload et le corps de l'aperçu en cours
 
     def fermer():
-        win.grab_release()
+        try:
+            win.grab_release()
+        except Exception:
+            pass
         win.destroy()
 
-    def envoyer():
+    def montrer_apercu():
+        """« Envoyer » sur le formulaire : on VÉRIFIE, on MONTRE, on n'envoie pas."""
         message = txt.get("1.0", "end").strip()
-        if not message:
-            etat.configure(text="Merci d'écrire un message avant d'envoyer.",
-                           foreground=P.get("danger", "#DC2626"))
+        payload = _payload(app, version, type_var.get(), email_var.get(), message)
+        corps = corps_envoye(payload)
+        refus = verifier(corps)
+        if refus:
+            etat.configure(text=refus, foreground=P.get("danger", "#DC2626"))
             txt.focus_set()
             return
-        payload = _payload(app, version, type_var.get(), email_var.get(), message)
+        en_attente.clear()
+        en_attente.update(payload=payload, corps=corps)
+        zone.configure(state="normal")
+        zone.delete("1.0", "end")
+        zone.insert("1.0", apercu(corps, FILONAUT_CONTACT_URL, _outbox(app)))
+        zone.configure(state="disabled")
+        etat_apercu.configure(text="")
+        formulaire.pack_forget()
+        page_apercu.pack(fill="both", expand=True)
+
+    def modifier():
+        page_apercu.pack_forget()
+        formulaire.pack(fill="both", expand=True)
+        txt.focus_set()
+
+    def envoyer_tel_quel():
+        """Le seul chemin qui envoie — et il envoie le dict de l'aperçu, pas un
+        autre. Un corps reconstruit ici pourrait diverger de ce qui a été montré."""
+        payload, corps = en_attente["payload"], en_attente["corps"]
         try:
             if FILONAUT_CONTACT_URL:
-                _poster_filonaut(payload)          # branché plus tard
+                _poster_corps(corps)
                 info = "Message envoyé. Merci !"
             else:
                 chemin = _enregistrer_localement(app, payload)
-                info = ("Message enregistré localement. L'envoi vers le panneau "
-                        f"sera activé prochainement.\n({chemin})")
+                info = f"Envoi désactivé dans cette version : message gardé localement.\n({chemin})"
         except Exception as exc:  # repli : ne jamais perdre le message
             try:
                 chemin = _enregistrer_localement(app, payload)
                 info = f"Message conservé localement (envoi indisponible : {exc}).\n({chemin})"
             except Exception:
-                etat.configure(text=f"Échec : {exc}", foreground=P.get("danger", "#DC2626"))
+                etat_apercu.configure(text=f"Échec : {exc}", foreground=P.get("danger", "#DC2626"))
                 return
-        for w in barre.winfo_children():
+        for w in barre_apercu.winfo_children():
             w.configure(state="disabled")
-        etat.configure(text=info, foreground=P.get("emeraude_fonce", "#10B981"))
+        etat_apercu.configure(text=info, foreground=P.get("emeraude_fonce", "#10B981"))
         win.after(2200, fermer)
 
-    style_annuler = "TButton"
-    style_envoyer = "Accent.TButton" if opl_theme else "TButton"
-    ttk.Button(barre, text="Annuler", command=fermer, style=style_annuler).pack(side="left", padx=(0, 8))
-    ttk.Button(barre, text="Envoyer", command=envoyer, style=style_envoyer).pack(side="left")
-
-    cadre.columnconfigure(0, weight=1)
-    cadre.columnconfigure(1, weight=1)
+    ttk.Button(barre, text="Annuler", command=fermer).pack(side="left", padx=(0, 8))
+    win.bouton_envoyer = ttk.Button(barre, text="Envoyer", command=montrer_apercu, style=style_envoyer)
+    win.bouton_envoyer.pack(side="left")
+    win.bouton_modifier = ttk.Button(barre_apercu, text="Modifier", command=modifier)
+    win.bouton_modifier.pack(side="left", padx=(0, 8))
+    win.bouton_confirmer = ttk.Button(barre_apercu, text="Envoyer tel quel", command=envoyer_tel_quel, style=style_envoyer)
+    win.bouton_confirmer.pack(side="left")
+    win.apercu = zone
+    win.message = txt
 
     win.update_idletasks()
     # centre la fenêtre sur le parent
@@ -202,5 +313,9 @@ def ouvrir(parent: tk.Misc, *, app: str, version: str = "") -> None:
         win.geometry(f"+{max(x, 0)}+{max(y, 0)}")
     except Exception:
         pass
-    win.grab_set()
+    try:
+        win.grab_set()
+    except Exception:
+        pass
     txt.focus_set()
+    return win
