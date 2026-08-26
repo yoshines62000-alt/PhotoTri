@@ -54,7 +54,8 @@ import webbrowser
 from pathlib import Path
 from tkinter import ttk
 
-__all__ = ["apply", "entete", "carte", "Rail", "PALETTE", "couleur", "police"]
+__all__ = ["apply", "entete", "carte", "Rail", "etat_vide", "Erreur",
+           "PALETTE", "couleur", "police"]
 
 # --- Palette (deux modes) -------------------------------------------------
 # Les accents de marque (cyan/émeraude/encre) sont communs aux deux modes : ils
@@ -666,6 +667,26 @@ def apply(root: tk.Misc, nom_appli: str = "", *, base: str = "clam", mode=None) 
     style.configure("RailGroupe.TLabel", background=p["fond"], foreground=p["gris_texte"],
                     font=(corps, 8), padding=(13, 10, 10, 2))
 
+    # --- etat vide --------------------------------------------------------
+    style.configure("EtatVide.TFrame", background=p["fond"])
+    style.configure("EtatVideTitre.TLabel", background=p["fond"], foreground=p["texte"], font=(titre, 12))
+    style.configure("EtatVideTexte.TLabel", background=p["fond"], foreground=p["texte_doux"], font=(corps, 9))
+
+    # --- erreur en ligne --------------------------------------------------
+    # Fond `surface_2` et non `danger_bg` : le bandeau se pose SOUS un champ,
+    # dans le flux, pas au milieu d'une page. Un aplat rouge y crierait ; la
+    # barre de 3 px suffit a le designer, et le texte reste lisible (le rouge
+    # sur `surface_2` tient au-dessus de 4,5:1, mesure).
+    style.configure("Erreur.TFrame", background=p["surface_2"])
+    style.configure("ErreurBarre.TFrame", background=p["danger"])
+    style.configure("ErreurTitre.TLabel", background=p["surface_2"], foreground=p["danger"], font=(titre, 9))
+    style.configure("ErreurTexte.TLabel", background=p["surface_2"], foreground=p["texte_doux"], font=(corps, 9))
+    # Le champ fautif se signale par son trait, pas par son fond : un fond
+    # rouge derriere du texte saisi le rend penible a relire, or c'est
+    # justement ce que l'utilisateur doit relire.
+    style.configure("Erreur.TEntry", fieldbackground=p["surface"], foreground=p["texte"],
+                    bordercolor=p["danger"], insertcolor=p["cyan"], padding=6, relief="flat")
+
     # --- montage des images (avec repli par widget) -----------------------
     imgs = _charger_images(root)
     if imgs is not None:
@@ -964,3 +985,125 @@ class Rail(ttk.Frame):
         i = self._index_de(self._courant) if self._courant is not None else 0
         self.select(max(0, min(len(self._pages) - 1, i + pas)))
         return "break"
+
+
+def etat_vide(parent: tk.Misc, titre: str, phrase: str, *,
+              action=None, libelle: str = "") -> ttk.Frame:
+    """Ce qu'on montre quand il n'y a encore rien.
+
+    Aucune des sept applications ne traitait ce cas : une liste vide etait
+    simplement... vide. C'est pourtant le PREMIER ecran qu'un nouvel
+    utilisateur voit, et celui ou il decide si l'outil lui parle.
+
+    Un titre, UNE phrase, UNE action — pas davantage. Pas d'illustration
+    non plus : Tkinter la rendrait mal, et elle n'apprendrait rien.
+
+    `action` (callable) ajoute un bouton principal portant `libelle`. Sans
+    action, l'etat vide se contente de dire ce qui manque.
+    """
+    cadre = ttk.Frame(parent, style="EtatVide.TFrame", padding=30)
+    bloc = ttk.Frame(cadre, style="EtatVide.TFrame")
+    bloc.place(relx=0.5, rely=0.5, anchor="center")
+    ttk.Label(bloc, text=titre, style="EtatVideTitre.TLabel",
+              anchor="center", justify="center").pack()
+    # wraplength en pixels : sans lui, une phrase un peu longue etire le
+    # cadre au lieu de revenir a la ligne, et l'etat vide devient une barre.
+    ttk.Label(bloc, text=phrase, style="EtatVideTexte.TLabel", anchor="center",
+              justify="center", wraplength=380).pack(pady=(6, 0))
+    if action is not None:
+        ttk.Button(bloc, text=libelle or "Commencer", style="Accent.TButton",
+                   command=action).pack(pady=(16, 0))
+    return cadre
+
+
+class Erreur(ttk.Frame):
+    """Une erreur de saisie, EN LIGNE, sous le champ fautif.
+
+    Les sept applications signalent leurs erreurs de saisie par une
+    messagebox : une fenetre modale que Windows dessine, qu'aucun theme
+    n'atteint, qui masque le champ dont elle parle et qu'il faut fermer
+    avant de pouvoir corriger. Pour « le taux horaire doit etre un nombre »,
+    c'est disproportionne.
+
+    Ici : le message reste a cote du champ, dit ce qui ne va pas ET comment
+    le corriger, marque le champ, et ne bloque rien. Il disparait des que
+    l'utilisateur retouche le champ — corriger fait partie de la correction.
+
+    S'utilise en trois temps :
+        self.err = opl_theme.Erreur(parent);  self.err.pack(fill="x")
+        ...
+        self.err.montrer("Montant", "« 12,4,50 » n'est pas un nombre.", champ=entree)
+        self.err.effacer()
+    """
+
+    def __init__(self, parent: tk.Misc, *, apres: tk.Misc = None, **kw):
+        """`apres` : le widget SOUS lequel l'erreur doit apparaitre —
+        typiquement le formulaire. Sans lui, pack() la placerait en fin
+        d'ordre d'empilement, donc tout en bas de la vue, a des centaines de
+        pixels du champ dont elle parle : toute sa raison d'etre. Constate a
+        l'ecran, pas a la relecture."""
+        super().__init__(parent, style="Erreur.TFrame", **kw)
+        self._apres = apres
+        self._barre = ttk.Frame(self, style="ErreurBarre.TFrame", width=3)
+        self._barre.pack(side="left", fill="y")
+        self._corps = ttk.Frame(self, style="Erreur.TFrame", padding=(9, 7))
+        self._corps.pack(side="left", fill="x", expand=True)
+        self._quoi = ttk.Label(self._corps, style="ErreurTitre.TLabel")
+        self._quoi.pack(side="left", padx=(0, 6))
+        self._texte = ttk.Label(self._corps, style="ErreurTexte.TLabel",
+                                wraplength=520, justify="left")
+        self._texte.pack(side="left", fill="x", expand=True)
+        self._champ = None
+        self._style_origine = ""
+        self._visible = False
+
+    @property
+    def visible(self) -> bool:
+        return self._visible
+
+    def montrer(self, quoi: str, texte: str, *, champ: tk.Misc = None) -> None:
+        """Affiche l'erreur. `quoi` nomme le champ (« Montant »), `texte` dit
+        ce qui ne va pas et comment le reparer. `champ`, s'il est fourni, est
+        marque, place au focus, et efface l'erreur des qu'il est modifie."""
+        self._quoi.configure(text=f"{quoi} :" if quoi else "")
+        self._texte.configure(text=texte)
+        self._marquer(champ)
+        if not self._visible:
+            place = {"after": self._apres} if self._apres is not None else {}
+            self.pack(fill="x", padx=10, pady=(6, 0), **place)
+            self._visible = True
+
+    def effacer(self) -> None:
+        """Retire l'erreur et rend au champ son apparence normale."""
+        self._demarquer()
+        if self._visible:
+            self.pack_forget()
+            self._visible = False
+
+    # -- interne -----------------------------------------------------------
+
+    def _marquer(self, champ) -> None:
+        self._demarquer()
+        if champ is None:
+            return
+        self._champ = champ
+        try:
+            self._style_origine = champ.cget("style") or "TEntry"
+            champ.configure(style="Erreur.TEntry")
+            champ.focus_set()
+            # <KeyRelease> et non <Key> : sur <Key>, l'erreur disparait AVANT
+            # que le caractere ne soit insere, donc avant toute correction
+            # reelle — elle clignotait a chaque frappe.
+            self._lien = champ.bind("<KeyRelease>", lambda _e: self.effacer(), "+")
+        except tk.TclError:
+            self._champ = None          # widget sans style (Text, Listbox...)
+
+    def _demarquer(self) -> None:
+        if self._champ is None:
+            return
+        try:
+            self._champ.configure(style=self._style_origine or "TEntry")
+            self._champ.unbind("<KeyRelease>", self._lien)
+        except tk.TclError:
+            pass
+        self._champ = None
