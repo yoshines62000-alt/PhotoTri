@@ -26,13 +26,44 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import re
 import sqlite3
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 
 class DonneesIllisibles(Exception):
     """Pas un fichier SQLite, ou un fichier altere."""
+
+
+#: Caracteres par lesquels Excel/LibreOffice reconnaissent une FORMULE. Meme
+#: liste que le _csv_safe des exports de l'application (csv_export.py,
+#: csv_transactions.py) : cet export-ci ecrit les memes donnees, pour le meme
+#: tableur, il doit offrir la meme protection (CWE-1236, audit du 2026-08-26).
+_PREFIXES_FORMULE = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _csv_sur(valeur):
+    """Neutralise l'injection de formule CSV : une cellule texte commencant par
+    =, +, - ou @ est prefixee d'une apostrophe, ce qui force le tableur a la
+    lire comme du texte. Les valeurs non-str (nombres, None) sont intactes."""
+    if isinstance(valeur, str) and valeur.startswith(_PREFIXES_FORMULE):
+        return "'" + valeur
+    return valeur
+
+
+def _nom_de_fichier_sur(nom: str, rang: int) -> str:
+    """Un nom de table est une chaine ARBITRAIRE : rien n'empeche une base
+    d'en porter une nommee "../../evade" ou "co:n*". Le nom venant du fichier
+    lu — donc potentiellement d'un fichier recu de l'exterieur, ce qui est
+    precisement le cas d'usage d'un outil de secours —, on n'ecrit jamais
+    directement sous ce nom : on n'en garde que la derniere composante, on
+    remplace ce que Windows refuse, et on retombe sur « table-N » s'il ne
+    reste rien. Mesure a l'audit du 2026-08-26 : sans cela, une table nommee
+    "../../evade" faisait ecrire deux dossiers au-dessus de celui demande."""
+    base = PurePosixPath(PureWindowsPath(nom).name).name
+    base = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", base).strip(" .")
+    return base if base else f"table-{rang}"
 
 
 def lire_tables(chemin: Path) -> dict:
@@ -74,14 +105,19 @@ def exporter(tables: dict, dossier: Path) -> list:
     dossier = Path(dossier)
     dossier.mkdir(parents=True, exist_ok=True)
     ecrits = []
-    for nom, lignes in tables.items():
-        cible = dossier / f"{nom}.csv"
+    vus = set()
+    for rang, (nom, lignes) in enumerate(tables.items(), start=1):
+        fichier = _nom_de_fichier_sur(nom, rang)
+        while fichier.lower() in vus:      # deux tables peuvent se reduire au meme nom
+            fichier = f"{fichier}-{rang}"
+        vus.add(fichier.lower())
+        cible = dossier / f"{fichier}.csv"
         with open(cible, "w", encoding="utf-8", newline="") as f:
             colonnes = list(lignes[0].keys()) if lignes else []
             w = csv.DictWriter(f, fieldnames=colonnes)
             w.writeheader()
             for ligne in lignes:
-                w.writerow(ligne)
+                w.writerow({k: _csv_sur(v) for k, v in ligne.items()})
         ecrits.append(cible)
     cible = dossier / "donnees.json"
     cible.write_text(json.dumps(tables, ensure_ascii=False, indent=2, default=str) + "\n", encoding="utf-8")

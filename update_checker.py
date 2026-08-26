@@ -71,6 +71,13 @@ DOWNLOAD_TIMEOUT_SECONDS = 30
 #: que l'empreinte se calcule au fil de l'eau sans tout garder en memoire.
 TAILLE_MORCEAU = 64 * 1024
 
+#: Plafond de taille annoncee. La borne BASSE (taille <= 0) ne suffisait pas :
+#: le controle de telechargement ne se declenche qu'en DEPASSANT la taille
+#: annoncee, donc l'annoncer enorme le desarme et un flux compromis pouvait
+#: faire ecrire jusqu'a saturation du disque (mesure a l'audit du 2026-08-26 :
+#: 10**15 octets acceptes sans broncher). 512 Mio laisse une marge confortable
+#: - le plus gros binaire publie de la suite tient largement en dessous.
+TAILLE_MAX_OCTETS = 512 * 1024 * 1024
 #: Le flux d'Open Projects Lab. Chemin FIGE (ADR 009) : une rupture s'appellerait
 #: /api/v2/ et /api/v1/ continuerait d'etre servi.
 FLUX_URL = "https://openprojectslab.com/api/v1/versions.json"
@@ -202,11 +209,23 @@ def dossier_telechargements() -> Path:
     return candidat if candidat.is_dir() else Path.home()
 
 
-def _verifier_binaire_annonce(entree: dict) -> tuple:
+def _verifier_binaire_annonce(entree: dict, repo: str = "") -> tuple:
     """Extrait (url, nom, taille, sha256) de l'entree du flux, ou leve
     TelechargementInvalide si l'un des quatre ne convient pas. On REFUSE avant
     la moindre requete : une adresse hors GitHub, une empreinte qui n'en est
-    pas une, une taille absurde - rien de tout cela ne merite un octet."""
+    pas une, une taille absurde - rien de tout cela ne merite un octet.
+
+    `repo` (ex. "yoshines62000-alt/Coffre"), quand il est fourni, restreint
+    l'adresse aux releases de CE depot et plus seulement a l'hote github.com.
+    Sans lui, un flux compromis pouvait designer
+    github.com/<attaquant>/depot/releases/download/... : une adresse GitHub
+    parfaitement legitime, servant un binaire arbitraire - et l'empreinte
+    attendue venant du MEME flux, elle ne discriminait rien (constat de
+    l'audit du 2026-08-26). Le controle passe de « chez GitHub » a « chez
+    moi ». Il ne s'applique qu'a github.com : objects.githubusercontent.com,
+    ou GitHub redirige ses telechargements, a une arborescence opaque qu'on
+    ne peut pas rattacher a un depot - ce cas reste couvert par le seul
+    controle d'hote."""
     binaire = entree.get("binaire") if isinstance(entree, dict) else None
     if not isinstance(binaire, dict):
         raise TelechargementInvalide("le flux ne decrit aucun binaire")
@@ -215,10 +234,16 @@ def _verifier_binaire_annonce(entree: dict) -> tuple:
     if not isinstance(url, str) or not isinstance(nom, str) or not nom:
         raise TelechargementInvalide("adresse ou nom de fichier manquant")
     parties = urllib.parse.urlsplit(url)
-    if parties.scheme != "https" or (parties.hostname or "").lower() not in HOTES_AUTORISES:
+    hote = (parties.hostname or "").lower()
+    if parties.scheme != "https" or hote not in HOTES_AUTORISES:
         raise TelechargementInvalide(f"adresse refusee : {url}")
+    if repo and hote == "github.com" and not parties.path.startswith(f"/{repo}/releases/download/"):
+        raise TelechargementInvalide(f"adresse hors des releases de {repo} : {url}")
     if not isinstance(taille, int) or isinstance(taille, bool) or taille <= 0:
         raise TelechargementInvalide("taille annoncee absente ou absurde")
+    if taille > TAILLE_MAX_OCTETS:
+        raise TelechargementInvalide(
+            f"taille annoncee absurde : {taille} octets, maximum {TAILLE_MAX_OCTETS}")
     if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", sha):
         raise TelechargementInvalide("empreinte SHA-256 annoncee invalide")
     # Le nom vient du flux : on n'en garde que la derniere composante, jamais
@@ -248,14 +273,15 @@ def _sha256_de(chemin: Path) -> str:
 
 
 def telecharger_et_verifier(entree: dict, dossier: Path | None = None,
-                            timeout: float = DOWNLOAD_TIMEOUT_SECONDS) -> Path:
+                            timeout: float = DOWNLOAD_TIMEOUT_SECONDS,
+                            repo: str = "") -> Path:
     """Telecharge le binaire decrit par `entree` dans `dossier`, en calculant
     l'empreinte SHA-256 au fil de l'eau, et ne le garde QUE si taille et
     empreinte sont exactement celles annoncees. Renvoie le chemin du fichier.
 
     Leve TelechargementInvalide (fichier partiel supprime) si quoi que ce soit
     differe, et laisse remonter les erreurs reseau. Ne lance jamais le fichier."""
-    url, nom, taille, sha = _verifier_binaire_annonce(entree)
+    url, nom, taille, sha = _verifier_binaire_annonce(entree, repo)
     dossier = Path(dossier) if dossier is not None else dossier_telechargements()
     final = _chemin_libre(dossier, nom, sha)
     if final.exists():        # deja la, deja verifie par _chemin_libre
@@ -263,7 +289,11 @@ def telecharger_et_verifier(entree: dict, dossier: Path | None = None,
     partiel = dossier / (nom + ".partiel")
     h = hashlib.sha256()
     recu = 0
-    request = urllib.request.Request(url, headers={"User-Agent": f"{slug_de(url)} update-checker"})
+    # slug_de() attend un DEPOT ("auteur/Coffre" -> "coffre") ; l'appliquer a
+    # une URL donnait un User-Agent "coffre.exe update-checker" (mesure a
+    # l'audit). Le nom du depot n'est pas toujours connu ici : un libelle
+    # constant dit la meme chose et ne peut pas deriver.
+    request = urllib.request.Request(url, headers={"User-Agent": "Open Projects Lab update-checker"})
     try:
         with urllib.request.urlopen(request, timeout=timeout) as reponse, open(partiel, "wb") as sortie:
             for morceau in iter(lambda: reponse.read(TAILLE_MORCEAU), b""):
@@ -314,7 +344,7 @@ def ouvrir_mise_a_jour(repo: str, releases_url: str, var, planifier, dossier: Pa
     def worker():
         try:
             dire(f"Telechargement de {nom}... (empreinte verifiee a l'arrivee)")
-            chemin = telecharger_et_verifier(entree, dossier)
+            chemin = telecharger_et_verifier(entree, dossier, repo=repo)
         except TelechargementInvalide as exc:
             # Le fichier n'est PAS celui annonce : il est supprime, on le dit,
             # on n'ouvre rien. Le clic suivant reprend l'ancien chemin (la page

@@ -152,6 +152,60 @@ class TestSecoursDonnees(unittest.TestCase):
         self.assertTrue((self.dossier / "cli" / "donnees.json").exists())
 
 
+class TestBaseHostile(unittest.TestCase):
+    """Un outil de secours se pointe sur un fichier qu'on n'a pas forcement
+    fabrique soi-meme. Les noms de table et les valeurs y sont donc des
+    donnees, pas des instructions (constats C4 et C5 de l'audit du 2026-08-26)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.dossier = Path(self._tmp.name)
+        self.sortie = self.dossier / "export"
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _base(self, table: str, valeur):
+        chemin = self.dossier / "hostile.sqlite"
+        conn = sqlite3.connect(chemin)
+        conn.execute(f'CREATE TABLE "{table.replace(chr(34), chr(34) * 2)}" (v TEXT)')
+        conn.execute(f'INSERT INTO "{table.replace(chr(34), chr(34) * 2)}" VALUES (?)', (valeur,))
+        conn.commit()
+        conn.close()
+        return chemin
+
+    def test_un_nom_de_table_qui_remonte_n_ecrit_pas_hors_du_dossier(self):
+        chemin = self._base("../../evade", "peu importe")
+        ecrits = secours.exporter(secours.lire_tables(chemin), self.sortie)
+        for f in ecrits:
+            self.assertEqual(Path(f).resolve().parent, self.sortie.resolve(),
+                             f"{f} est ecrit hors du dossier demande")
+
+    def test_un_nom_de_table_qui_ne_laisse_rien_reste_exportable(self):
+        chemin = self._base("..", "peu importe")
+        ecrits = secours.exporter(secours.lire_tables(chemin), self.sortie)
+        csvs = [f for f in ecrits if Path(f).suffix == ".csv"]
+        self.assertEqual(len(csvs), 1)
+        self.assertTrue(Path(csvs[0]).name.startswith("table-"), Path(csvs[0]).name)
+
+    def test_une_valeur_qui_ressemble_a_une_formule_est_neutralisee(self):
+        """Meme protection que les exports de l'application (_csv_safe) : cet
+        export-ci ecrit les memes donnees, pour le meme tableur."""
+        chemin = self._base("t", "=cmd|' /C calc'!A0")
+        secours.exporter(secours.lire_tables(chemin), self.sortie)
+        cellule = (self.sortie / "t.csv").read_text(encoding="utf-8").splitlines()[1]
+        self.assertFalse(cellule.startswith("="), f"formule non neutralisee : {cellule}")
+        self.assertTrue(cellule.startswith("'="), cellule)
+
+    def test_le_json_garde_le_nom_de_table_exact(self):
+        """La desinfection ne vaut que pour le NOM DE FICHIER : le JSON doit
+        rester fidele a ce que la base contient."""
+        chemin = self._base("../../evade", "x")
+        secours.exporter(secours.lire_tables(chemin), self.sortie)
+        donnees = json.loads((self.sortie / "donnees.json").read_text(encoding="utf-8"))
+        self.assertIn("../../evade", donnees)
+
+
 class TestAutonomie(unittest.TestCase):
     def test_le_script_n_importe_que_la_bibliotheque_standard(self):
         source = (Path(__file__).resolve().parent.parent / "secours_donnees.py").read_text(encoding="utf-8")

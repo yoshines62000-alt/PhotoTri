@@ -319,6 +319,35 @@ class TestTelechargerEtVerifier(unittest.TestCase):
                     update_checker.telecharger_et_verifier(_entree(url=url), self.dossier)
         urlopen.assert_not_called()
 
+    def test_une_taille_annoncee_demesuree_est_refusee_avant_toute_requete(self):
+        """La borne BASSE (taille <= 0) ne suffit pas : le controle en cours de
+        telechargement ne se declenche qu'en DEPASSANT la taille annoncee, donc
+        l'annoncer enorme le desarme et laisse ecrire jusqu'a saturation du
+        disque. Mesure a l'audit du 2026-08-26 : 10**15 octets acceptes."""
+        with patch("urllib.request.urlopen") as urlopen:
+            for taille in (update_checker.TAILLE_MAX_OCTETS + 1, 10 ** 15):
+                with self.assertRaises(update_checker.TelechargementInvalide, msg=str(taille)):
+                    update_checker.telecharger_et_verifier(_entree(taille=taille), self.dossier)
+        urlopen.assert_not_called()
+
+    def test_un_binaire_hors_des_releases_du_depot_est_refuse_quand_le_depot_est_connu(self):
+        """L'hote seul ne suffit pas : github.com/<attaquant>/... est une
+        adresse GitHub parfaitement legitime. Quand le depot est connu, on
+        exige que l'adresse soit une release DE CE DEPOT - l'empreinte
+        attendue venant du meme flux, elle ne discrimine rien (audit)."""
+        bonne = "https://github.com/owner/repo/releases/download/v2/Repo.exe"
+        with patch("urllib.request.urlopen") as urlopen:
+            for url in ("https://github.com/attaquant/piege/releases/download/v2/Repo.exe",
+                        "https://github.com/owner/repo/raw/master/Repo.exe",
+                        "https://github.com/owner/repo-bis/releases/download/v2/Repo.exe"):
+                with self.assertRaises(update_checker.TelechargementInvalide, msg=url):
+                    update_checker.telecharger_et_verifier(_entree(url=url), self.dossier, repo="owner/repo")
+        urlopen.assert_not_called()
+        # ... et l'adresse legitime du meme depot passe toujours.
+        with patch("urllib.request.urlopen", return_value=_reponse_en_flux(CORPS)):
+            chemin = update_checker.telecharger_et_verifier(_entree(url=bonne), self.dossier, repo="owner/repo")
+        self.assertTrue(chemin.exists())
+
     def test_une_empreinte_ou_une_taille_annoncee_invalide_est_refusee_avant_toute_requete(self):
         with patch("urllib.request.urlopen") as urlopen:
             for mauvais in ({"sha": "pas-une-empreinte"}, {"sha": "a" * 63}, {"taille": 0}, {"taille": -5}, {"taille": True}):

@@ -27,8 +27,10 @@ from __future__ import annotations
 import json
 import os
 import platform
+import queue
 import re
 import sys
+import threading
 import tkinter as tk
 import urllib.request
 from datetime import datetime, timezone
@@ -64,7 +66,13 @@ _EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 TYPES = ["Signaler un bug", "Suggestion d'amélioration", "Question", "Autre"]
 
 
-def _outbox(app: str) -> Path:
+def _outbox(app: str = "") -> Path:
+    """La boite d'envoi locale, COMMUNE aux applications d'Open Projects Lab :
+    un seul fichier sous %APPDATA%\\OpenProjectsLab, pas un par application —
+    l'application dont vient le message est deja dans chaque ligne (champ
+    "app" du payload). `app` n'est donc pas utilise pour construire le chemin ;
+    il reste accepte pour ne pas casser les appelants et rend l'intention
+    lisible sur le site des appels."""
     base = os.environ.get("APPDATA") if sys.platform.startswith("win") else None
     racine = Path(base) if base else Path.home() / ".config"
     dossier = racine / "OpenProjectsLab"
@@ -271,28 +279,82 @@ def ouvrir(parent: tk.Misc, *, app: str, version: str = "") -> tk.Toplevel:
         formulaire.pack(fill="both", expand=True)
         txt.focus_set()
 
-    def envoyer_tel_quel():
-        """Le seul chemin qui envoie — et il envoie le dict de l'aperçu, pas un
-        autre. Un corps reconstruit ici pourrait diverger de ce qui a été montré."""
-        payload, corps = en_attente["payload"], en_attente["corps"]
+    resultat_envoi: "queue.Queue" = queue.Queue()
+
+    def _relever_resultat():
+        """Relève le résultat de l'envoi DEPUIS le thread Tk. Le worker se
+        contente de déposer dans une queue ; c'est le thread principal qui
+        vient chercher, exactement comme partout ailleurs dans cette suite
+        d'outils (thread + queue.Queue + after). Aucun appel à Tk n'est jamais
+        fait depuis le thread d'envoi : un `after()` appelé depuis un autre
+        thread attend que la boucle d'événements le prenne, ce qui bloque le
+        worker aussi longtemps que le thread principal ne pompe pas.
+
+        Un échec total (envoi ET boîte d'envoi impossibles) rend la main pour
+        réessayer ; un succès ferme la fenêtre au bout de 2,2 s."""
+        if not win.winfo_exists():
+            return
         try:
-            if FILONAUT_CONTACT_URL:
-                _poster_corps(corps)
-                info = "Message envoyé. Merci !"
-            else:
-                chemin = _enregistrer_localement(app, payload)
-                info = f"Envoi désactivé dans cette version : message gardé localement.\n({chemin})"
-        except Exception as exc:  # repli : ne jamais perdre le message
-            try:
-                chemin = _enregistrer_localement(app, payload)
-                info = f"Message conservé localement (envoi indisponible : {exc}).\n({chemin})"
-            except Exception:
-                etat_apercu.configure(text=f"Échec : {exc}", foreground=P.get("danger", "#DC2626"))
-                return
-        for w in barre_apercu.winfo_children():
-            w.configure(state="disabled")
+            info, echec = resultat_envoi.get_nowait()
+        except queue.Empty:
+            win.after(80, _relever_resultat)
+            return
+        if echec:
+            for w in barre_apercu.winfo_children():
+                w.configure(state="normal")
+            etat_apercu.configure(text=info, foreground=P.get("danger", "#DC2626"))
+            return
         etat_apercu.configure(text=info, foreground=P.get("emeraude_fonce", "#10B981"))
         win.after(2200, fermer)
+
+    def envoyer_tel_quel():
+        """Le seul chemin qui envoie — et il envoie le dict de l'aperçu, pas un
+        autre. Un corps reconstruit ici pourrait diverger de ce qui a été montré.
+
+        L'ENVOI PART SUR UN THREAD. Jusqu'au 2026-08-26, _poster_corps était
+        appelé directement dans ce callback, donc sur le thread Tk : toute
+        l'application gelait le temps de la requête — jusqu'à _TIMEOUT_S
+        secondes, et ce délai ne borne que la connexion et la lecture, la
+        résolution DNS s'y ajoute. Mesuré à l'audit : un battement d'interface
+        au lieu d'une soixantaine sur trois secondes, soit une fenêtre blanche
+        et un « ne répond pas » de Windows au moment précis où l'utilisateur
+        signale un bug. C'est la règle appliquée partout ailleurs dans cette
+        suite d'outils (voir update_checker.start_update_check) : le réseau vit
+        sur un thread, seul win.after touche aux widgets.
+
+        Renvoie le thread lancé — exposé aussi en `win.envoi`, pour les tests,
+        comme update_checker.ouvrir_mise_a_jour le fait. Un second clic pendant
+        un envoi ne relance rien (les boutons sont désactivés dès le départ)."""
+        if en_attente.get("envoi"):
+            return None
+        payload, corps = en_attente["payload"], en_attente["corps"]
+        for w in barre_apercu.winfo_children():
+            w.configure(state="disabled")
+        etat_apercu.configure(text="Envoi en cours…", foreground=P.get("texte_doux", "#5A6B80"))
+
+        def worker():
+            try:
+                if FILONAUT_CONTACT_URL:
+                    _poster_corps(corps)
+                    info, echec = "Message envoyé. Merci !", False
+                else:
+                    chemin = _enregistrer_localement(app, payload)
+                    info, echec = f"Envoi désactivé dans cette version : message gardé localement.\n({chemin})", False
+            except Exception as exc:  # repli : ne jamais perdre le message
+                try:
+                    chemin = _enregistrer_localement(app, payload)
+                    info, echec = f"Message conservé localement (envoi indisponible : {exc}).\n({chemin})", False
+                except Exception:
+                    info, echec = f"Échec : {exc}", True
+            en_attente["envoi"] = None
+            resultat_envoi.put((info, echec))   # aucun appel Tk depuis ce thread
+
+        fil = threading.Thread(target=worker, daemon=True)
+        en_attente["envoi"] = fil
+        win.envoi = fil
+        fil.start()
+        win.after(0, _relever_resultat)         # la relève, elle, part du thread Tk
+        return fil
 
     ttk.Button(barre, text="Annuler", command=fermer).pack(side="left", padx=(0, 8))
     win.bouton_envoyer = ttk.Button(barre, text="Envoyer", command=montrer_apercu, style=style_envoyer)
@@ -303,6 +365,7 @@ def ouvrir(parent: tk.Misc, *, app: str, version: str = "") -> tk.Toplevel:
     win.bouton_confirmer.pack(side="left")
     win.apercu = zone
     win.message = txt
+    win.envoi = None   # le thread d'envoi, une fois « Envoyer tel quel » cliqué
 
     win.update_idletasks()
     # centre la fenêtre sur le parent

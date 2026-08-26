@@ -10,6 +10,7 @@ import io
 import json
 import platform
 import sys
+import time
 import tkinter as tk
 import unittest
 from pathlib import Path
@@ -138,6 +139,24 @@ class TestApercuEgalEnvoi(unittest.TestCase):
         self.assertIn("trop long", str(cm.exception))
 
 
+class _Reponse(io.BytesIO):
+    """Une reponse HTTP minimale, SANS MagicMock.
+
+    L'envoi se fait desormais sur un thread. Or construire un MagicMock dans
+    un thread secondaire fait entrer la machinerie de unittest.mock (creation
+    des mocks enfants, installation des methodes magiques) hors du thread
+    principal, ou elle peut rester bloquee plusieurs secondes - constate en
+    conditions reelles sur la suite de GuideExpress, pile a l'appui. Le code
+    de production ne fabrique jamais de mock ; c'est le harnais qui doit
+    rester sobre. Meme approche que _reponse() dans test_update_checker."""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
 class TestFenetre(unittest.TestCase):
     """La fenetre reelle : « Envoyer » MONTRE, seul « Envoyer tel quel » ENVOIE."""
 
@@ -160,6 +179,18 @@ class TestFenetre(unittest.TestCase):
         win = opl_contact.ouvrir(self.root, app="Appli", version="1.2.3")
         self.addCleanup(lambda: win.winfo_exists() and win.destroy())
         return win
+
+    def _pomper(self, predicat, limite=10.0):
+        """Fait tourner la boucle Tk jusqu'a ce que `predicat` soit vrai. En
+        test il n'y a pas de mainloop() : c'est ici qu'on la remplace, pour
+        que la releve du resultat d'envoi (win.after) ait lieu."""
+        fin = time.perf_counter() + limite
+        while time.perf_counter() < fin:
+            self.root.update()
+            if predicat():
+                return True
+            time.sleep(0.02)
+        return False
 
     def test_envoyer_montre_l_apercu_sans_rien_envoyer(self):
         win = self._ouvrir()
@@ -188,20 +219,47 @@ class TestFenetre(unittest.TestCase):
 
         def urlopen(request, timeout=None):
             capture["corps"] = json.loads(request.data.decode("utf-8"))
-            r = MagicMock()
-            r.read.return_value = b'{"ok": true}'
-            r.__enter__.return_value = r
-            return r
+            return _Reponse(b'{"ok": true}')
 
         with patch("urllib.request.urlopen", side_effect=urlopen):
             win.bouton_envoyer.invoke()
             self.root.update()
             montre = win.apercu.get("1.0", "end")
             win.bouton_confirmer.invoke()
-            self.root.update()
+            # L'envoi part sur un thread (il gelait l'interface auparavant) :
+            # on l'attend avant de regarder ce qui est parti.
+            self.assertTrue(self._pomper(lambda: "corps" in capture))
         self.assertEqual(capture["corps"]["message"], "[Signaler un bug] le bouton bleu ne répond plus")
         self.assertIn(json.dumps(capture["corps"], ensure_ascii=False, indent=2), montre,
                       "ce qui est parti n'est pas ce qui a ete montre")
+
+    def test_envoyer_tel_quel_ne_gele_pas_l_interface(self):
+        """Le clic « Envoyer tel quel » doit RENDRE LA MAIN tout de suite, meme
+        si le serveur met du temps a repondre. Jusqu'au 2026-08-26, _poster_corps
+        etait appele sur le thread Tk : l'application entiere gelait jusqu'a
+        _TIMEOUT_S secondes (mesure a l'audit : un battement d'interface au lieu
+        d'une soixantaine sur trois secondes). Le reseau vit desormais sur un
+        thread, comme partout ailleurs dans cette suite d'outils."""
+        lenteur = 1.0
+        win = self._ouvrir()
+        win.message.insert("1.0", "le serveur est lent aujourd'hui")
+
+        def urlopen(request, timeout=None):
+            time.sleep(lenteur)
+            return _Reponse(b'{"ok": true}')
+
+        with patch("urllib.request.urlopen", side_effect=urlopen):
+            win.bouton_envoyer.invoke()
+            self.root.update()
+            debut = time.perf_counter()
+            win.bouton_confirmer.invoke()
+            rendu = time.perf_counter() - debut
+            self.assertLess(rendu, lenteur / 2,
+                            f"le callback a bloque {rendu:.2f} s : l'interface est gelee pendant l'envoi")
+            self.assertIsNotNone(win.envoi, "l'envoi doit partir sur un thread expose pour les tests")
+            self.assertTrue(self._pomper(lambda: not win.envoi.is_alive()),
+                            "le thread d'envoi ne s'est jamais termine : il bloque sur un appel a Tk")
+        self.assertFalse(win.envoi.is_alive())
 
     def test_modifier_revient_au_formulaire_sans_envoyer(self):
         win = self._ouvrir()
