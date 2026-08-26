@@ -491,7 +491,13 @@ class PhotoTriApp:
         action_bar = ttk.Frame(self.detail_frame)
         action_bar.pack(fill=X, pady=(8, 0))
         ttk.Label(action_bar, text="Dossier de revision :", foreground=opl_theme.couleur("texte"), font=BODY_FONT).pack(side=LEFT)
-        ttk.Entry(action_bar, textvariable=self.review_folder_var, width=45, state="readonly").pack(side=LEFT, padx=5)
+        # Le champ ABSORBE la place, les boutons gardent leur largeur
+        # naturelle : avec une largeur fixe de 45 caracteres, la rangee
+        # depassait des que les libelles s'elargissaient (police de titre
+        # non condensee), et c'est le bouton de droite qui se faisait
+        # rogner - le defaut meme que la note ci-dessous decrit.
+        ttk.Entry(action_bar, textvariable=self.review_folder_var, width=38,
+                  state="readonly").pack(side=LEFT, padx=5, fill=X, expand=True)
         self.change_review_button = ttk.Button(action_bar, text="Changer...", command=self._choose_review_folder)
         self.change_review_button.pack(side=LEFT)
         # Libelle raccourci (bug trouve a l'audit, F2) : le texte complet

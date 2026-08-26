@@ -54,7 +54,7 @@ import webbrowser
 from pathlib import Path
 from tkinter import ttk
 
-__all__ = ["apply", "entete", "carte", "PALETTE", "couleur", "police"]
+__all__ = ["apply", "entete", "carte", "Rail", "PALETTE", "couleur", "police"]
 
 # --- Palette (deux modes) -------------------------------------------------
 # Les accents de marque (cyan/émeraude/encre) sont communs aux deux modes : ils
@@ -63,56 +63,77 @@ __all__ = ["apply", "entete", "carte", "PALETTE", "couleur", "police"]
 # mode AVANT que l'appli ne construise ses widgets — c'est pourquoi couleur(),
 # lu à la création de chaque widget, rend la bonne teinte dans les deux modes.
 _LIGHT = {
-    "encre": "#0A0F1A",
-    "ardoise": "#131C2E",
-    "ardoise_clair": "#1E2B44",
-    "cyan": "#22D3EE",
-    "cyan_fonce": "#0EA5C4",
-    "emeraude": "#34D399",
-    "emeraude_fonce": "#10B981",
-    "vert_lab": "#3DDC97",
-    "gris_texte": "#8A9EB8",
-    "fond": "#F5F7FA",
-    "surface": "#FFFFFF",
-    "surface_2": "#EEF3FA",
-    "bordure": "#D6DEE8",
-    "bordure_forte": "#B9C6D8",
-    "texte": "#16202E",
-    "texte_doux": "#5A6B80",
-    "survol": "#E8F0FC",
-    "danger": "#DC2626",
-    "danger_bg": "#FEE2E2",
-    "lien": "#0EA5C4",
-    "succes": "#10B981",
-    "avertissement": "#B45309",
-    "avertissement_bg": "#FEF3C7",
-    "surbrillance": "#FEF9C3",
+    # — L'ACCENT, ET SES DEUX RÔLES ------------------------------------------
+    # `cyan` est l'APLAT : des fonds, des traits, la barre de l'entrée active.
+    # Il ne sert JAMAIS de texte — 1,82:1 sur blanc, illisible. Pour écrire en
+    # accent, c'est `cyan_fonce` (5,15:1). C'est la distinction que le site
+    # tient sous les noms --accent / --accent-texte, et la confondre est
+    # l'erreur qui rend une interface jolie et inutilisable.
+    "cyan": "#30D2EB",            # --accent (aplat), identique en clair et sombre
+    "cyan_fonce": "#1E759C",      # --accent-texte : l'accent ÉCRIT
+    "accent_survol": "#5FD8F5",   # cyan-400 — survol d'un aplat
+    "accent_presse": "#38BDDC",   # cyan-500 — aplat enfoncé
+    "encre": "#04222E",           # --sur-accent : ce qu'on écrit SUR l'aplat (9,07:1)
+    # — Marque (fonds navy du site, pour un bandeau ou un aplat sombre)
+    "ardoise": "#10141C",
+    "ardoise_clair": "#171D27",
+    # — Surfaces
+    "fond": "#EDF1F8",            # clair-100
+    "surface": "#FFFFFF",         # clair-000
+    "surface_2": "#F5F8FC",       # clair-050
+    "survol": "#F5F8FC",
+    "bordure": "#DCE3EF",         # clair-200
+    "bordure_forte": "#808899",   # clair-300
+    # — Texte
+    "texte": "#10141C",           # navy-900 — 18,44:1 sur surface
+    "texte_doux": "#3C4A68",      # encre-600 — 8,86:1
+    "gris_texte": "#54648A",      # encre-400 — 5,89:1
+    # — États. Les rampes CLAIRES : ambre-400 sur blanc rend 1,89:1, d'où les
+    # variantes -700. Les fonds sont dérivés comme sur le site (mélange de la
+    # teinte -400 sur le fond moyen), au taux qui laisse le texte au-dessus de
+    # 4,5:1 — mesuré, pas approché.
+    "danger": "#AC495A",          # rouge-700 — 5,45:1
+    "danger_bg": "#F3E8EE",       # texte danger dessus : 4,56:1
+    "succes": "#217756",          # vert-700 — 5,47:1
+    "emeraude_fonce": "#217756",
+    "emeraude": "#37C68F",        # vert-400 — aplat, pas du texte
+    "vert_lab": "#2F9E68",
+    "avertissement": "#826535",   # ambre-700 — 5,44:1
+    "avertissement_bg": "#F2EEE5",
+    "surbrillance": "#F2EBDF",
+    "lien": "#1E759C",
 }
 _DARK = {
-    "encre": "#0A0F1A",           # reste le texte SUR les boutons cyan (lisible)
-    "ardoise": "#0C1422",         # bandeau, un cran sous le fond
+    # L'APLAT NE CHANGE PAS : c'est la couleur de la teinte, pas un rôle de
+    # surface. Seule l'encre s'adapte — vif sur fond sombre, assombrie sur
+    # fond clair. Le bouton principal a donc exactement le même cyan dans les
+    # deux thèmes, et c'est voulu.
+    "cyan": "#30D2EB",
+    "cyan_fonce": "#59E2FD",      # --accent-texte version vive (12,05:1 sur navy)
+    "accent_survol": "#5FD8F5",
+    "accent_presse": "#38BDDC",
+    "encre": "#04222E",           # inchangé : on écrit toujours sombre sur l'aplat
+    "ardoise": "#0C1422",
     "ardoise_clair": "#1B2740",
-    "cyan": "#22D3EE",
-    "cyan_fonce": "#38BEE0",
-    "emeraude": "#34D399",
-    "emeraude_fonce": "#34D399",
+    "fond": "#0A0D13",            # navy-950
+    "surface": "#10141C",         # navy-900
+    "surface_2": "#171D27",       # navy-850
+    "survol": "#171D27",
+    "bordure": "#232A36",         # navy-700
+    "bordure_forte": "#637294",   # navy-600
+    "texte": "#EEF2F8",           # ardoise-100
+    "texte_doux": "#A7B6CF",      # ardoise-300
+    "gris_texte": "#8798B5",      # ardoise-400
+    "danger": "#ED657C",          # rouge-400
+    "danger_bg": "#2F1F29",
+    "succes": "#37C68F",          # vert-400
+    "emeraude_fonce": "#37C68F",
+    "emeraude": "#37C68F",
     "vert_lab": "#3DDC97",
-    "gris_texte": "#8A9EB8",
-    "fond": "#0F1626",            # fond général sombre
-    "surface": "#16203A",         # champs, listes, cartes
-    "surface_2": "#1B2740",
-    "bordure": "#2A3A57",
-    "bordure_forte": "#3A4E70",
-    "texte": "#EAF2FF",
-    "texte_doux": "#9DB0C9",
-    "survol": "#22304C",
-    "danger": "#F87171",
-    "danger_bg": "#3A1D1D",
-    "lien": "#38BEE0",
-    "succes": "#34D399",
-    "avertissement": "#FBBF24",
-    "avertissement_bg": "#3A2E12",
-    "surbrillance": "#3A340F",
+    "avertissement": "#E8B45F",   # ambre-400
+    "avertissement_bg": "#2E2A25",
+    "surbrillance": "#373128",
+    "lien": "#59E2FD",
 }
 PALETTE = dict(_LIGHT)   # dictionnaire ACTIF, basculé par apply()
 
@@ -368,13 +389,26 @@ def apply(root: tk.Misc, nom_appli: str = "", *, base: str = "clam", mode=None) 
         pass
 
     p = PALETTE
-    titre = _police_dispo(root, "Bahnschrift SemiBold", "Bahnschrift", "Segoe UI Semibold", "Segoe UI", "TkDefaultFont")
-    titre_reg = _police_dispo(root, "Bahnschrift", "Segoe UI Semibold", "Segoe UI", "TkDefaultFont")
+    # Segoe UI Semibold EN TETE : c'est la police du site et de BRAND.md.
+    # Bahnschrift reste en repli — elle passait devant, ce qui donnait aux
+    # apps une graisse condensee que le site n'a nulle part.
+    titre = _police_dispo(root, "Segoe UI Semibold", "Bahnschrift SemiBold", "Segoe UI", "TkDefaultFont")
+    titre_reg = _police_dispo(root, "Segoe UI Semibold", "Bahnschrift", "Segoe UI", "TkDefaultFont")
     corps = _police_dispo(root, "Segoe UI", "Inter", "DejaVu Sans", "TkDefaultFont")
     mono = _police_dispo(root, "Cascadia Mono", "Consolas", "DejaVu Sans Mono", "TkFixedFont")
+    # SIX PAS, UN ROLE PAR PAS. L'echelle en comptait neuf (9, 10, 11, 13,
+    # 15, 22...) sans qu'aucun role ne les distingue : c'est ce qui fait
+    # qu'une fenetre parait bricolee sans qu'on sache dire pourquoi.
+    # `display` est en MONO a chasse fixe : ses deux seuls usages sont des
+    # NOMBRES (chronometre, valeurs du tableau de bord), qui doivent
+    # s'aligner et ne pas danser quand ils changent.
     _POLICES.update({
-        "display": (titre, 22), "titre": (titre, 15), "soustitre": (corps, 11),
-        "corps": (corps, 10), "corps_gras": (titre_reg, 10), "petit": (corps, 9),
+        "display": (mono, 26),      # un seul usage par appli, jamais du texte
+        "titre": (titre, 12),       # titre de vue
+        "soustitre": (titre, 11),   # nom de l'appli dans le bandeau
+        "corps_gras": (titre, 10),  # boutons, entree active du rail
+        "corps": (corps, 9),        # texte courant, listes
+        "petit": (corps, 8),        # barre d'etat, legendes, groupes
         "mono": (mono, 9),
     })
 
@@ -474,20 +508,40 @@ def apply(root: tk.Misc, nom_appli: str = "", *, base: str = "clam", mode=None) 
     style.configure("TSizegrip", background=p["fond"])
 
     # Rendus plats de repli (utilisés si les images ne montent pas)
-    style.configure("TButton", background=p["surface"], foreground=p["texte"],
-                    bordercolor=p["bordure"], focuscolor=p["cyan"], padding=(9, 5), relief="flat")
+    # focuscolor = cyan_fonce et NON cyan : l'aplat #30D2EB ne rend que
+    # 2,83:1 sur lui-meme, l'anneau y serait invisible. Mesure, pas suppose.
+    style.configure("TButton", background=p["surface_2"], foreground=p["texte"],
+                    bordercolor=p["bordure_forte"], focuscolor=p["cyan_fonce"],
+                    padding=(11, 5), relief="flat", font=(corps, 10))
     style.map("TButton",
-              background=[("pressed", p["bordure"]), ("active", p["survol"]), ("disabled", p["fond"])],
-              foreground=[("disabled", p["texte_doux"])],
-              bordercolor=[("focus", p["cyan"]), ("active", p["cyan"])])
+              background=[("pressed", p["bordure"]), ("active", p["fond"]), ("disabled", p["surface_2"])],
+              foreground=[("disabled", p["bordure_forte"])],
+              bordercolor=[("pressed", p["cyan"]), ("focus", p["cyan_fonce"]),
+                           ("disabled", p["bordure"]), ("active", p["bordure_forte"])])
+    # LE BOUTON PRINCIPAL DEVENAIT VERT AU SURVOL : sa map pointait sur
+    # emeraude/emeraude_fonce, reliquat d'une palette ou l'accent etait teal.
+    # Un bouton cyan qui vire au vert sous le curseur, dans les sept applis.
+    # Les etats restent desormais dans la rampe cyan du site (cyan-400 au
+    # survol, cyan-500 enfonce).
+    # focuscolor = encre : sur l'aplat cyan, c'est la SEULE valeur lisible
+    # (9,07:1 contre 2,83:1 pour cyan_fonce).
     style.configure("Accent.TButton", background=p["cyan"], foreground=p["encre"],
-                    bordercolor=p["cyan"], padding=(11, 6), relief="flat", font=(titre, 10))
+                    bordercolor=p["cyan"], focuscolor=p["encre"],
+                    padding=(12, 6), relief="flat", font=(titre, 10))
     style.map("Accent.TButton",
-              background=[("pressed", p["emeraude_fonce"]), ("active", p["emeraude"]), ("disabled", p["bordure"])],
-              foreground=[("disabled", p["texte_doux"])])
-    style.configure("Danger.TButton", background=p["surface"], foreground=p["danger"],
-                    bordercolor=p["bordure"], padding=(9, 5), relief="flat")
-    style.map("Danger.TButton", background=[("pressed", p["danger_bg"]), ("active", p["danger_bg"])])
+              background=[("pressed", p["accent_presse"]), ("active", p["accent_survol"]),
+                          ("disabled", p["surface_2"])],
+              bordercolor=[("pressed", p["accent_presse"]), ("active", p["accent_survol"]),
+                           ("disabled", p["bordure"])],
+              foreground=[("disabled", p["bordure_forte"])])
+    style.configure("Danger.TButton", background=p["surface_2"], foreground=p["danger"],
+                    bordercolor=p["danger"], focuscolor=p["danger"],
+                    padding=(11, 5), relief="flat", font=(corps, 10))
+    style.map("Danger.TButton",
+              background=[("pressed", p["danger_bg"]), ("active", p["danger_bg"]),
+                          ("disabled", p["surface_2"])],
+              foreground=[("disabled", p["bordure_forte"])],
+              bordercolor=[("disabled", p["bordure"])])
 
     style.configure("TEntry", fieldbackground=p["surface"], foreground=p["texte"],
                     bordercolor=p["bordure"], insertcolor=p["cyan"], padding=6, relief="flat")
@@ -571,12 +625,46 @@ def apply(root: tk.Misc, nom_appli: str = "", *, base: str = "clam", mode=None) 
     style.configure("CarteDouce.TFrame", background=p["surface_2"], relief="solid",
                     borderwidth=1, bordercolor=p["bordure"], padding=16)
 
-    # En-tête de marque : bandeau ardoise, texte clair.
-    style.configure("Entete.TFrame", background=p["ardoise"])
-    style.configure("EnteteTitre.TLabel", background=p["ardoise"], foreground="#EAF2FF", font=(titre, 15))
-    style.configure("EnteteSousTitre.TLabel", background=p["ardoise"], foreground=p["gris_texte"], font=(mono, 9))
-    style.configure("EntetePuce.TLabel", background=p["ardoise_clair"], foreground=p["cyan"], font=(mono, 8), padding=(8, 3))
-    style.configure("EnteteLien.TLabel", background=p["ardoise"], foreground=p["cyan"], font=(corps, 10))
+    # En-tête de marque. IL SUIT LE THÈME — il était verrouillé sur le navy
+    # `ardoise` dans les DEUX modes, avec un texte codé en dur (#EAF2FF) qui
+    # n'est lisible que sur du sombre. En thème clair on obtenait donc une
+    # barre noire au-dessus d'une application claire, et ses liens tombaient
+    # à 3,4:1 une fois la palette du site posée. Ce qui identifie la marque
+    # n'est pas un fond noir : c'est le TRAIT CYAN de 2 px en dessous.
+    style.configure("Entete.TFrame", background=p["fond"])
+    style.configure("EnteteTrait.TFrame", background=p["cyan"])
+    style.configure("EnteteTitre.TLabel", background=p["fond"], foreground=p["texte"], font=(titre, 11))
+    style.configure("EnteteSousTitre.TLabel", background=p["fond"], foreground=p["gris_texte"], font=(mono, 8))
+    style.configure("EntetePuce.TLabel", background=p["surface_2"], foreground=p["cyan_fonce"], font=(mono, 8), padding=(8, 3))
+    style.configure("EnteteLien.TLabel", background=p["fond"], foreground=p["cyan_fonce"], font=(corps, 9))
+
+    # --- rail de navigation (remplace ttk.Notebook) -----------------------
+    # Le rail vit sur `fond`, la zone de travail sur `surface` : c'est ce seul
+    # ecart de valeur qui les separe, sans ombre ni relief.
+    style.configure("RailHote.TFrame", background=p["fond"])
+    style.configure("Rail.TFrame", background=p["fond"])
+    style.configure("RailTrait.TFrame", background=p["bordure"])
+    # La zone de travail reste sur `fond`, PAS sur `surface`. La maquette la
+    # voulait blanche ; essaye et mesure a l'ecran, le rendu est PAR PLAQUES :
+    # seule la page recoit le blanc, ses sous-cadres gardent `fond`, et les
+    # applications en imbriquent partout. Un aplat uniforme separe deja le rail
+    # du travail par son trait d'un pixel — c'est plus propre qu'un blanc
+    # troue.
+    style.configure("RailContenu.TFrame", background=p["fond"])
+    # La barre de 3 px qui marque l'entree active. `RailBarre` est transparente
+    # (couleur du rail) : seule l'entree active recoit `RailBarreActive`.
+    style.configure("RailBarre.TFrame", background=p["fond"])
+    style.configure("RailBarreActive.TFrame", background=p["cyan"])
+    style.configure("RailItem.TLabel", background=p["fond"], foreground=p["texte_doux"],
+                    font=(corps, 9), padding=(10, 6))
+    style.configure("RailItemSurvol.TLabel", background=p["surface_2"], foreground=p["texte"],
+                    font=(corps, 9), padding=(10, 6))
+    # DEUX signaux pour l'etat actif — la barre cyan ET le fond. La couleur du
+    # texte seule ne se voit pas, et ne se voit pas du tout en daltonisme.
+    style.configure("RailItemActif.TLabel", background=p["surface_2"], foreground=p["texte"],
+                    font=(titre, 10), padding=(10, 6))
+    style.configure("RailGroupe.TLabel", background=p["fond"], foreground=p["gris_texte"],
+                    font=(corps, 8), padding=(13, 10, 10, 2))
 
     # --- montage des images (avec repli par widget) -----------------------
     imgs = _charger_images(root)
@@ -627,8 +715,13 @@ def entete(parent: tk.Misc, nom_appli: str, accroche: str = "", *,
     Le bandeau est le seul chrome commun aux sept — un lien de plus ici, c'est
     une ligne changée dans chaque gui.py, et le même comportement partout.
     """
-    cadre = ttk.Frame(parent, style="Entete.TFrame", padding=(20, 14))
-    ligne = ttk.Frame(cadre, style="Entete.TFrame")
+    # `cadre` n'est plus qu'un conteneur : le rembourrage descend dans
+    # `corps`, pour que le trait cyan puisse courir sur TOUTE la largeur,
+    # bord à bord, sans être rentré de 20 px comme le reste.
+    cadre = ttk.Frame(parent, style="Entete.TFrame")
+    corps_entete = ttk.Frame(cadre, style="Entete.TFrame", padding=(20, 12))
+    corps_entete.pack(fill="x")
+    ligne = ttk.Frame(corps_entete, style="Entete.TFrame")
     ligne.pack(fill="x")
     bloc = ttk.Frame(ligne, style="Entete.TFrame")
     bloc.pack(side="left")
@@ -645,8 +738,8 @@ def entete(parent: tk.Misc, nom_appli: str, accroche: str = "", *,
         lab = ttk.Label(droite, text=texte, style="EnteteLien.TLabel", cursor="hand2")
         lab.pack(anchor="e", pady=(8, 0))
         lab.bind("<Button-1>", lambda _e: action())
-        lab.bind("<Enter>", lambda _e: lab.configure(foreground="#EAF2FF"))
-        lab.bind("<Leave>", lambda _e: lab.configure(foreground=PALETTE["cyan"]))
+        lab.bind("<Enter>", lambda _e: lab.configure(foreground=PALETTE["texte"]))
+        lab.bind("<Leave>", lambda _e: lab.configure(foreground=PALETTE["cyan_fonce"]))
         return lab
 
     # Bascule clair/sombre : toujours présente. Le libellé annonce la cible.
@@ -681,6 +774,11 @@ def entete(parent: tk.Misc, nom_appli: str, accroche: str = "", *,
         lien_aide = _lien("?  Aide", lambda: None)
         lien_aide.bind("<Button-1>", lambda _e: derouler(lien_aide))
         cadre.menu_aide = menu
+
+    # LA signature de la marque, dans les deux thèmes : deux pixels de cyan
+    # bord à bord. Un Frame vide de hauteur 2 — aucun enfant, donc aucune
+    # propagation de géométrie à désactiver.
+    ttk.Frame(cadre, style="EnteteTrait.TFrame", height=2).pack(fill="x", side="bottom")
     return cadre
 
 
@@ -732,3 +830,137 @@ def carte(parent: tk.Misc, titre: str = "", *, doux: bool = False, **kw) -> ttk.
     if titre:
         ttk.Label(cadre, text=titre, style="CarteTitre.TLabel").pack(anchor="w", pady=(0, 10))
     return cadre
+
+class Rail(ttk.Frame):
+    """Navigation VERTICALE, en remplacement de ttk.Notebook.
+
+    POURQUOI — PdfAtelier a onze onglets horizontaux. A la largeur par defaut
+    de sa fenetre ils se serrent jusqu'a ce que huit libelles sur onze soient
+    tronques : l'application la plus riche de la suite devient la plus
+    illisible. Une liste verticale en tient onze sans effort, se parcourt au
+    clavier, et donne aux applications la meme silhouette.
+
+    L'API est celle de ttk.Notebook — `add`, `select`, `tabs`, `tab`, `index`,
+    et l'evenement <<NotebookTabChanged>> — pour que le remplacement tienne en
+    UNE ligne dans chaque application et que les tests qui pilotent la
+    navigation continuent de fonctionner tels quels.
+
+    PIEGE DE PARENTE TK : les pages sont creees comme enfants du Rail
+    (`ttk.Frame(rail)`, exactement comme avec un Notebook), mais elles sont
+    affichees dans `_contenu`, qui est leur FRERE. Tk l'autorise — le
+    gestionnaire de geometrie peut etre un descendant du parent du widget —
+    et c'est ce qui permet de garder la meme signature d'appel.
+    """
+
+    LARGEUR = 170          # mesure sur le plus long libelle reel de la suite
+
+    def __init__(self, parent, *, largeur: int = LARGEUR, **kw):
+        super().__init__(parent, style="RailHote.TFrame", takefocus=True, **kw)
+        self._barre = ttk.Frame(self, style="Rail.TFrame", width=largeur)
+        self._barre.pack(side="left", fill="y")
+        self._barre.pack_propagate(False)      # sinon la barre se retrecit sur son contenu
+        ttk.Frame(self, style="RailTrait.TFrame", width=1).pack(side="left", fill="y")
+        self._contenu = ttk.Frame(self, style="RailContenu.TFrame")
+        self._contenu.pack(side="left", fill="both", expand=True)
+        # TOUTES les pages sont empilees dans LA MEME cellule de grille, comme
+        # le fait ttk.Notebook : la cellule reclame donc la taille de la plus
+        # grande, et la fenetre se calibre sur la vue la plus encombrante et
+        # non sur celle qui se trouve ouverte. Changer de vue n'est alors
+        # qu'un tkraise(), sans aucun rappel differe — un `after_idle` posait
+        # ici un « can't delete Tcl command » a la fermeture, une erreur qui
+        # ne dit rien de sa cause.
+        self._contenu.grid_rowconfigure(0, weight=1)
+        self._contenu.grid_columnconfigure(0, weight=1)
+        self._pages: list = []                 # [{page, texte, entree, barre, label}]
+        self._courant = None
+        self.bind("<Up>", lambda _e: self._voisin(-1))
+        self.bind("<Down>", lambda _e: self._voisin(+1))
+        self.bind("<Home>", lambda _e: self.select(0))
+        self.bind("<End>", lambda _e: self.select(len(self._pages) - 1))
+
+    # -- construction ------------------------------------------------------
+
+    def add(self, page, text: str = "", groupe: str = "") -> None:
+        """Ajoute une page. `groupe`, s'il est fourni, insere un intertitre
+        AVANT elle — c'est la seule addition a l'API du Notebook, et elle est
+        facultative : sans elle, le rail est une simple liste."""
+        if groupe:
+            ttk.Label(self._barre, text=groupe.upper(), style="RailGroupe.TLabel").pack(fill="x", anchor="w")
+        entree = ttk.Frame(self._barre, style="Rail.TFrame", cursor="hand2")
+        entree.pack(fill="x")
+        barre = ttk.Frame(entree, style="RailBarre.TFrame", width=3)
+        barre.pack(side="left", fill="y")
+        label = ttk.Label(entree, text=text, style="RailItem.TLabel", cursor="hand2", anchor="w")
+        label.pack(side="left", fill="x", expand=True)
+
+        page.grid(in_=self._contenu, row=0, column=0, sticky="nsew")
+        fiche = {"page": page, "texte": text, "entree": entree, "barre": barre, "label": label}
+        self._pages.append(fiche)
+
+        for w in (entree, label):
+            w.bind("<Button-1>", lambda _e, p=page: self.select(p))
+            w.bind("<Enter>", lambda _e, f=fiche: self._survol(f, True))
+            w.bind("<Leave>", lambda _e, f=fiche: self._survol(f, False))
+        if self._courant is None:
+            self.select(page)
+
+    # -- API compatible Notebook -------------------------------------------
+
+    def tabs(self) -> tuple:
+        """Les chemins Tk des pages, dans l'ordre — comme Notebook.tabs()."""
+        return tuple(str(f["page"]) for f in self._pages)
+
+    def tab(self, cible, option=None):
+        """tab(cible, "text") rend le libelle ; sans option, le dictionnaire."""
+        fiche = self._pages[self._index_de(cible)]
+        infos = {"text": fiche["texte"], "state": "normal"}
+        if option is None:
+            return infos
+        return infos[option.lstrip("-")]
+
+    def index(self, cible) -> int:
+        return self._index_de(cible)
+
+    def select(self, cible=None):
+        """Sans argument : le chemin Tk de la page affichee (comme Notebook).
+        Avec : affiche cette page et emet <<NotebookTabChanged>>."""
+        if cible is None:
+            return str(self._courant) if self._courant is not None else ""
+        fiche = self._pages[self._index_de(cible)]
+        if self._courant is fiche["page"]:
+            return None
+        for f in self._pages:
+            actif = f is fiche
+            f["label"].configure(style="RailItemActif.TLabel" if actif else "RailItem.TLabel")
+            f["barre"].configure(style="RailBarreActive.TFrame" if actif else "RailBarre.TFrame")
+        fiche["page"].tkraise()
+        self._courant = fiche["page"]
+        self.event_generate("<<NotebookTabChanged>>")
+        return None
+
+    # -- interne -----------------------------------------------------------
+
+    def _index_de(self, cible) -> int:
+        """Accepte un index, un widget, ou un chemin Tk — les trois formes que
+        ttk.Notebook accepte, parce que les appelants utilisent les trois."""
+        if isinstance(cible, int):
+            return cible
+        chemin = str(cible)
+        for i, f in enumerate(self._pages):
+            if str(f["page"]) == chemin:
+                return i
+        raise ValueError(f"page inconnue du rail : {cible!r}")
+
+    def _survol(self, fiche, dedans: bool) -> None:
+        if fiche["page"] is self._courant:
+            return                              # l'actif ne bouge pas au survol
+        fiche["label"].configure(style="RailItemSurvol.TLabel" if dedans else "RailItem.TLabel")
+
+    def _voisin(self, pas: int) -> str:
+        """Fleches haut/bas : navigation au clavier, que les onglets
+        horizontaux ne donnaient pas (Tab les traversait un par un)."""
+        if not self._pages:
+            return "break"
+        i = self._index_de(self._courant) if self._courant is not None else 0
+        self.select(max(0, min(len(self._pages) - 1, i + pas)))
+        return "break"
