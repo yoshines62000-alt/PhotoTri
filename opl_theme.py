@@ -255,14 +255,14 @@ def _appliquer_images(style: ttk.Style, imgs: dict, titre: str, corps: str) -> l
     # PERF (mesuré le 2026-08-10) — les éléments-images ÉTIRÉS (boutons, champs :
     # 9-patch `sticky=nsew`) coûtent extrêmement cher à dessiner dès qu'une
     # fenêtre en compte beaucoup : jusqu'à 6,5 s de PREMIER RENDU sur l'app la
-    # plus dense (DownloadOrganizer), contre ~0,1 s sans eux. Le coût vient de
+    # plus dense (NettoyeurTelechargements), contre ~0,1 s sans eux. Le coût vient de
     # l'étirement 9-patch recalculé par widget, pas de l'alpha (rendre les coins
     # opaques ne l'enlève qu'à moitié). Les INDICATEURS (cases/radios/switch :
     # taille FIXE, `sticky=""`) ne s'étirent pas → négligeables, on les garde
     # toujours. Les boutons/champs restent donc PLATS par défaut (rendu clam
     # déjà posé dans apply(), rapide) ; leur version arrondie est un opt-in
     # assumé via OPL_ROUNDED=1. NE PAS réactiver les images de bouton/champ par
-    # défaut sans re-mesurer le premier rendu de DownloadOrganizer.
+    # défaut sans re-mesurer le premier rendu de NettoyeurTelechargements.
     rounded = os.environ.get("OPL_ROUNDED") == "1"
 
     def bouton(style_nom, prefixe, focus_img=None):
@@ -450,7 +450,7 @@ def apply(root: tk.Misc, nom_appli: str = "", *, base: str = "clam", mode=None) 
         # Les 7 applis en utilisent des centaines. ttk ne les stylise pas et
         # option_add non plus par défaut : en clair ils passaient inaperçus
         # (défauts Windows ≈ palette claire), mais en SOMBRE ils restaient des
-        # blocs clairs (ex. la barre de statut de DownloadOrganizer). On pose
+        # blocs clairs (ex. la barre de statut de NettoyeurTelechargements). On pose
         # donc des défauts pour chaque type classique — une couleur explicite
         # de l'appli (via couleur()) reste prioritaire, ces valeurs ne sont que
         # le repli.
@@ -869,7 +869,7 @@ def _logo(widget: tk.Misc):
     """Le logo OPL en 26 px, ou None s'il est introuvable.
 
     Charge par tk.PhotoImage, qui lit le PNG NATIVEMENT depuis Tk 8.6 : aucune
-    dependance a l'execution. Cela compte — DownloadOrganizer et Enveloppe n'en
+    dependance a l'execution. Cela compte — NettoyeurTelechargements et Enveloppe n'en
     ont aucune, et un logo ne justifie pas d'en ajouter une. Absent, on se
     passe de l'image plutot que d'echouer : le nom de l'application suffit.
 
