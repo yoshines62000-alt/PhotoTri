@@ -95,5 +95,83 @@ class TestMenuAide(unittest.TestCase):
         self.assertIn("MIT", menu.entrycget(dernier, "label"))
 
 
+
+class TestDialogue(unittest.TestCase):
+    """La confirmation themee, et surtout SA REGLE : detruire n'est jamais
+    l'action par defaut."""
+
+    def setUp(self):
+        try:
+            self.root = tk.Tk()
+        except tk.TclError as exc:                       # pragma: no cover
+            raise unittest.SkipTest(f"pas d'affichage Tk : {exc}")
+        self.root.geometry("400x240+50+50")
+        self.root.deiconify()
+        opl_theme.apply(self.root, "Essai")
+        self.addCleanup(self.root.destroy)
+
+    def _repondre(self, touche=None, bouton=None, **kw):
+        """Ouvre un dialogue et repond a sa place, puis rend son resultat."""
+        def agir():
+            fenetre = [w for w in self.root.winfo_children() if isinstance(w, tk.Toplevel)][0]
+            if bouton:
+                getattr(fenetre, bouton).invoke()
+            else:
+                fenetre.focus_force()
+                self.root.update()
+                fenetre.event_generate(touche)
+        self.root.after(300, agir)
+        return opl_theme.dialogue(self.root, "Supprimer une entree",
+                                  "Cette suppression ne se rattrape pas.", **kw)
+
+    def test_detruire_n_est_jamais_l_action_par_defaut(self):
+        """LE point de ce composant. Avec danger=True, la touche Entree — celle
+        qu'on frappe par reflexe — doit ANNULER. Sans le drapeau, elle
+        confirme : c'est la contre-epreuve, sans laquelle le test ne prouve
+        rien (il passerait aussi si Entree n'etait jamais liee)."""
+        self.assertFalse(self._repondre("<Return>", confirmer="Supprimer", danger=True),
+                         "Entree ne doit pas detruire quand danger=True")
+        self.assertTrue(self._repondre("<Return>", confirmer="Enregistrer"),
+                        "sans danger, Entree doit confirmer")
+
+    def test_echap_et_la_croix_annulent(self):
+        self.assertFalse(self._repondre("<Escape>", confirmer="Supprimer", danger=True))
+
+    def test_le_bouton_dit_ce_qu_il_fait(self):
+        """« Oui » n'apprend rien : un utilisateur qui lit vite ne lit souvent
+        QUE les boutons."""
+        vus = {}
+
+        def agir():
+            fenetre = [w for w in self.root.winfo_children() if isinstance(w, tk.Toplevel)][0]
+            vus["confirmer"] = fenetre.bouton_confirmer.cget("text")
+            vus["annuler"] = fenetre.bouton_annuler.cget("text")
+            fenetre.bouton_annuler.invoke()
+
+        self.root.after(300, agir)
+        opl_theme.dialogue(self.root, "Supprimer une categorie", "14 transactions seront deplacees.",
+                           confirmer="Supprimer la categorie", danger=True)
+        self.assertEqual(vus["confirmer"], "Supprimer la categorie")
+        self.assertEqual(vus["annuler"], "Annuler")
+
+    def test_le_clic_sur_confirmer_rend_vrai(self):
+        self.assertTrue(self._repondre(bouton="bouton_confirmer", confirmer="Supprimer", danger=True))
+
+    def test_le_titre_ne_repete_pas_le_nom_de_l_application(self):
+        """Le titre dit DE QUOI il s'agit ; le nom de l'appli est deja dans la
+        barre de titre du systeme."""
+        vus = {}
+
+        def agir():
+            fenetre = [w for w in self.root.winfo_children() if isinstance(w, tk.Toplevel)][0]
+            vus["titre"] = fenetre.title()
+            fenetre.bouton_annuler.invoke()
+
+        self.root.after(300, agir)
+        opl_theme.dialogue(self.root, "Purger les metadonnees", "Le titre et l'auteur seront retires.",
+                           confirmer="Purger")
+        self.assertEqual(vus["titre"], "Purger les metadonnees")
+
+
 if __name__ == "__main__":
     unittest.main()

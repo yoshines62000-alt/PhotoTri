@@ -870,7 +870,7 @@ class TestDiskSpaceCheckBeforeBatchMove(unittest.TestCase):
         for p in self._patchers:
             p.start()
             self.addCleanup(p.stop)
-        self.mock_askyesno = mock.patch("tkinter.messagebox.askyesno").start()
+        self.mock_askyesno = mock.patch("opl_theme.dialogue").start()
         self.addCleanup(mock.patch.stopall)
 
     def tearDown(self):

@@ -96,7 +96,7 @@ class GuiSmokeTestCase(unittest.TestCase):
             mock.patch("tkinter.messagebox.showerror"),
             mock.patch("tkinter.messagebox.showwarning"),
             mock.patch("tkinter.messagebox.showinfo"),
-            mock.patch("tkinter.messagebox.askyesno", return_value=True),
+            mock.patch("opl_theme.dialogue", return_value=True),
         ]
         for p in self._patchers:
             p.start()

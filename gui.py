@@ -1240,11 +1240,12 @@ class PhotoTriApp:
             messagebox.showinfo(APP_TITLE, "Aucune photo cochee.")
             return
         if len(checked_ids) == len(self._selected_group.photo_ids):
-            if not messagebox.askyesno(
-                APP_TITLE,
-                "Toutes les photos du groupe sont cochees - aucune ne restera a cet "
-                "emplacement d'origine. Continuer quand meme ?",
-            ):
+            if not opl_theme.dialogue(
+                self.root, "Aucune photo ne restera ici",
+                "Toutes les photos de ce groupe sont cochees : l'emplacement d'origine "
+                "sera vide apres le deplacement. Rien n'est supprime — tout part dans le "
+                "dossier de revision, ou vous pourrez les reprendre.",
+                confirmer="Deplacer quand meme"):
                 return
 
         review_dir = Path(self.review_folder_var.get())
@@ -1296,12 +1297,12 @@ class PhotoTriApp:
         except OSError:
             free_bytes = None
         if free_bytes is not None and required_bytes > free_bytes:
-            if not messagebox.askyesno(
-                APP_TITLE,
-                "Espace disque insuffisant sur le volume de destination :\n"
-                f"{_format_size(required_bytes)} necessaire(s), {_format_size(free_bytes)} disponible(s) "
-                f"dans :\n{review_dir}\n\nContinuer quand meme ?",
-            ):
+            if not opl_theme.dialogue(
+                self.root, "Espace disque insuffisant",
+                f"Le deplacement demande {_format_size(required_bytes)}, il n'en reste que "
+                f"{_format_size(free_bytes)} dans {review_dir}. Le deplacement s'arretera en "
+                "cours de route, et les photos deja deplacees y resteront.",
+                confirmer="Tenter quand meme", danger=True):
                 return
 
         # -- deplacement effectif sur un thread dedie ------------------------------

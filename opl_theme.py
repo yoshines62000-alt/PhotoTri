@@ -54,7 +54,7 @@ import webbrowser
 from pathlib import Path
 from tkinter import ttk
 
-__all__ = ["apply", "entete", "carte", "Rail", "etat_vide", "Erreur",
+__all__ = ["apply", "entete", "carte", "Rail", "etat_vide", "Erreur", "dialogue",
            "PALETTE", "couleur", "police"]
 
 # --- Palette (deux modes) -------------------------------------------------
@@ -687,6 +687,14 @@ def apply(root: tk.Misc, nom_appli: str = "", *, base: str = "clam", mode=None) 
     style.configure("Erreur.TEntry", fieldbackground=p["surface"], foreground=p["texte"],
                     bordercolor=p["danger"], insertcolor=p["cyan"], padding=6, relief="flat")
 
+    # --- dialogue de confirmation ----------------------------------------
+    style.configure("Dialogue.TFrame", background=p["surface"])
+    style.configure("DialogueTete.TFrame", background=p["fond"])
+    style.configure("DialogueTrait.TFrame", background=p["cyan"])
+    style.configure("DialogueTitre.TLabel", background=p["fond"], foreground=p["texte"], font=(titre, 11))
+    style.configure("DialogueTexte.TLabel", background=p["surface"], foreground=p["texte_doux"], font=(corps, 9))
+    style.configure("DialoguePied.TFrame", background=p["surface"])
+
     # --- montage des images (avec repli par widget) -----------------------
     imgs = _charger_images(root)
     if imgs is not None:
@@ -1107,3 +1115,94 @@ class Erreur(ttk.Frame):
         except tk.TclError:
             pass
         self._champ = None
+
+
+def dialogue(parent: tk.Misc, titre: str, message: str, *,
+             confirmer: str = "Confirmer", annuler: str = "Annuler",
+             danger: bool = False) -> bool:
+    """Une confirmation THEMEE, en remplacement de messagebox.askyesno.
+
+    `tkinter.messagebox` ouvre des boites dessinees par Windows : aucun theme
+    ne les atteint. Une suite entierement repeinte qui ouvre une fenetre grise
+    a chaque confirmation n'a pas l'air soignee, elle a l'air inachevee.
+
+    Trois differences avec askyesno, et elles ne sont pas cosmetiques :
+
+      · LE BOUTON DIT CE QU'IL FAIT. « Supprimer la categorie » au lieu de
+        « Oui ». Un utilisateur qui lit vite ne lit souvent QUE les boutons ;
+        « Oui » ne lui apprend rien sur ce qui va se produire.
+
+      · L'ACTION DESTRUCTRICE N'EST JAMAIS PAR DEFAUT. Avec `danger=True`, la
+        touche Entree valide « Annuler », et c'est lui qui a le focus. Une
+        frappe reflexe ne doit pas pouvoir detruire.
+
+      · LE TITRE DIT DE QUOI IL S'AGIT, au lieu de repeter le nom de
+        l'application — que l'utilisateur voit deja dans la barre de titre.
+
+    Renvoie True si l'utilisateur confirme. Echap et la croix annulent.
+    """
+    fenetre = tk.Toplevel(parent)
+    fenetre.title(titre)
+    fenetre.resizable(False, False)
+    fenetre.configure(background=PALETTE["surface"])
+    try:
+        fenetre.transient(parent.winfo_toplevel())
+    except tk.TclError:
+        pass
+
+    reponse = {"ok": False}
+
+    tete = ttk.Frame(fenetre, style="DialogueTete.TFrame", padding=(18, 12))
+    tete.pack(fill="x")
+    ttk.Label(tete, text=titre, style="DialogueTitre.TLabel").pack(anchor="w")
+    ttk.Frame(fenetre, style="DialogueTrait.TFrame", height=2).pack(fill="x")
+
+    corps = ttk.Frame(fenetre, style="Dialogue.TFrame", padding=(18, 16))
+    corps.pack(fill="both", expand=True)
+    ttk.Label(corps, text=message, style="DialogueTexte.TLabel",
+              wraplength=420, justify="left").pack(anchor="w")
+
+    pied = ttk.Frame(fenetre, style="DialoguePied.TFrame", padding=(18, 0, 18, 16))
+    pied.pack(fill="x")
+
+    def fermer(ok: bool) -> None:
+        reponse["ok"] = ok
+        try:
+            fenetre.grab_release()
+        except tk.TclError:
+            pass
+        fenetre.destroy()
+
+    barre = ttk.Frame(pied, style="DialoguePied.TFrame")
+    barre.pack(side="right")
+    bouton_annuler = ttk.Button(barre, text=annuler, command=lambda: fermer(False))
+    bouton_annuler.pack(side="left", padx=(0, 8))
+    bouton_confirmer = ttk.Button(barre, text=confirmer, command=lambda: fermer(True),
+                                  style="Danger.TButton" if danger else "Accent.TButton")
+    bouton_confirmer.pack(side="left")
+
+    # Le focus va sur ANNULER quand l'action est destructrice : c'est ce qui
+    # fait qu'une frappe reflexe sur Entree ne detruit rien.
+    defaut = bouton_annuler if danger else bouton_confirmer
+    fenetre.bind("<Return>", lambda _e: defaut.invoke())
+    fenetre.bind("<Escape>", lambda _e: fermer(False))
+    fenetre.protocol("WM_DELETE_WINDOW", lambda: fermer(False))
+
+    fenetre.update_idletasks()
+    try:                                   # centre sur la fenetre appelante
+        haut = parent.winfo_toplevel()
+        x = haut.winfo_rootx() + (haut.winfo_width() - fenetre.winfo_reqwidth()) // 2
+        y = haut.winfo_rooty() + (haut.winfo_height() - fenetre.winfo_reqheight()) // 3
+        fenetre.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+    except tk.TclError:
+        pass
+    try:
+        fenetre.grab_set()
+    except tk.TclError:
+        pass
+    defaut.focus_set()
+    # Expose pour les tests, comme opl_contact expose ses boutons.
+    fenetre.bouton_confirmer = bouton_confirmer
+    fenetre.bouton_annuler = bouton_annuler
+    parent.wait_window(fenetre)
+    return reponse["ok"]
