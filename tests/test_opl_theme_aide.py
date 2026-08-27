@@ -96,6 +96,79 @@ class TestMenuAide(unittest.TestCase):
 
 
 
+class TestColonneVerticale(unittest.TestCase):
+    """Le bandeau horizontal est devenu UNE COLONNE a gauche (2026-08-27) :
+    marque en haut, vues au milieu, Theme et Aide en bas."""
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            cls.root = tk.Tk()
+            cls.root.withdraw()
+        except tk.TclError as exc:                       # pragma: no cover
+            raise unittest.SkipTest(f"pas d'affichage Tk : {exc}")
+        opl_theme.apply(cls.root, "Appli")
+
+    @classmethod
+    def tearDownClass(cls):
+        try:
+            cls.root.destroy()
+        except Exception:
+            pass
+
+    def _textes(self, widget):
+        morceaux = []
+        for enfant in widget.winfo_children():
+            try:
+                morceaux.append(str(enfant.cget("text")))
+            except Exception:
+                pass
+            morceaux.append(self._textes(enfant))
+        return " ".join(morceaux)
+
+    def test_entete_rend_le_rail_lui_meme(self):
+        """Une seule colonne : l'application n'a plus a creer un rail a part."""
+        colonne = opl_theme.entete(self.root, "Appli", "Accroche", slug="appli", version="1.2.3")
+        self.assertIsInstance(colonne, opl_theme.Rail)
+
+    def test_la_marque_porte_le_nom_et_l_accroche(self):
+        colonne = opl_theme.entete(self.root, "Appli", "Une accroche", slug="appli")
+        textes = self._textes(colonne)
+        self.assertIn("Appli", textes)
+        self.assertIn("Une accroche", textes)
+
+    def test_il_n_y_a_plus_de_lien_contact_separe(self):
+        """LA decision : « Contact » et « Signaler un probleme… » appelaient la
+        MEME fonction. Une seule porte, dans le menu Aide."""
+        colonne = opl_theme.entete(self.root, "Appli", "Accroche", slug="appli",
+                                   on_contact=lambda: None)
+        self.assertNotIn("Contact", self._textes(colonne))
+        labels = [colonne.menu_aide.entrycget(i, "label")
+                  for i in range(colonne.menu_aide.index("end") + 1)
+                  if colonne.menu_aide.type(i) == "command"]
+        self.assertTrue(any("Signaler" in l for l in labels),
+                        "le contact doit rester joignable depuis le menu Aide")
+
+    def test_sans_menu_aide_le_contact_garde_sa_propre_entree(self):
+        """Contre-epreuve : retirer le lien ne doit pas rendre le contact
+        INJOIGNABLE. Sans slug il n'y a pas de menu Aide — le lien revient."""
+        colonne = opl_theme.entete(self.root, "Appli", "Accroche", on_contact=lambda: None)
+        self.assertIn("contacter", self._textes(colonne))
+
+    def test_la_version_ne_s_affiche_pas_deux_fois(self):
+        """Les applications portent deja leur version en barre d'etat."""
+        colonne = opl_theme.entete(self.root, "Appli", "Accroche", slug="appli", version="1.2.3")
+        self.assertNotIn("v1.2.3", self._textes(colonne))
+
+    def test_sans_contenu_la_colonne_n_a_pas_de_zone_de_travail(self):
+        """Les applications sans navigation par vues (Coffre, GuideExpress,
+        PhotoTri) gardent leur mise en page : la colonne n'est qu'une colonne."""
+        avec = opl_theme.entete(self.root, "Appli", "", slug="appli")
+        sans = opl_theme.entete(self.root, "Appli", "", slug="appli", avec_contenu=False)
+        self.assertIsNotNone(avec._contenu)
+        self.assertIsNone(sans._contenu)
+
+
 class TestDialogue(unittest.TestCase):
     """La confirmation themee, et surtout SA REGLE : detruire n'est jamais
     l'action par defaut."""

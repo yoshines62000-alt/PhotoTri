@@ -666,6 +666,19 @@ def apply(root: tk.Misc, nom_appli: str = "", *, base: str = "clam", mode=None) 
                     font=(titre, 10), padding=(10, 6))
     style.configure("RailGroupe.TLabel", background=p["fond"], foreground=p["gris_texte"],
                     font=(corps, 8), padding=(13, 10, 10, 2))
+    # La marque, en haut du rail : logo, nom de l'application, accroche.
+    style.configure("RailMarque.TFrame", background=p["fond"])
+    style.configure("RailMarqueNom.TLabel", background=p["fond"], foreground=p["texte"], font=(titre, 12))
+    style.configure("RailMarqueAccroche.TLabel", background=p["fond"], foreground=p["gris_texte"], font=(corps, 8))
+    style.configure("RailMarqueTrait.TFrame", background=p["cyan"])
+    # Le pied : Theme et Aide, discrets, colles en bas.
+    style.configure("RailPied.TFrame", background=p["fond"])
+    style.configure("RailLien.TLabel", background=p["fond"], foreground=p["texte_doux"],
+                    font=(corps, 9), padding=(13, 5))
+    style.configure("RailLienSurvol.TLabel", background=p["surface_2"], foreground=p["cyan_fonce"],
+                    font=(corps, 9), padding=(13, 5))
+    style.configure("RailVersion.TLabel", background=p["fond"], foreground=p["gris_texte"],
+                    font=(mono, 8), padding=(13, 4, 10, 10))
 
     # --- etat vide --------------------------------------------------------
     style.configure("EtatVide.TFrame", background=p["fond"])
@@ -727,57 +740,33 @@ def url_aide(cle: str, slug: str = "") -> str:
 
 def entete(parent: tk.Misc, nom_appli: str, accroche: str = "", *,
            badge: str = "OPEN PROJECTS LAB", on_contact=None,
-           slug: str | None = None, version: str = "") -> ttk.Frame:
-    """Bandeau de marque à empaqueter en haut de la fenêtre (fill='x').
+           slug: str | None = None, version: str = "",
+           avec_contenu: bool = True) -> "Rail":
+    """LA COLONNE DE GAUCHE de l'application — marque, vues, Theme et Aide.
 
-    `on_contact` : si fourni (callable sans argument), ajoute un lien « Contact »
-    cliquable à droite du bandeau — typiquement `lambda: opl_contact.ouvrir(...)`.
+    Elle remplace le bandeau horizontal qui courait en haut : celui-ci coutait
+    environ 135 px de HAUTEUR pour afficher quatre liens empiles a droite, dans
+    des applications ou la hauteur utile est ce qui manque le plus. La colonne
+    les porte sans rien couter de plus, puisqu'elle existe deja pour les vues.
 
-    `slug` : si fourni, ajoute un lien « Aide » qui déroule un petit menu vers
-    la fiche du logiciel sur le site, le glossaire et la communauté — plus
-    « Signaler un problème » (le contact) et une ligne « À propos ». Le menu est
-    exposé en `cadre.menu_aide` (None sans slug), pour les tests.
+    LE LIEN « CONTACT » A DISPARU. Il appelait exactement la meme fonction que
+    « Signaler un probleme… » du menu Aide : deux portes, deux libelles, une
+    seule action — et un utilisateur qui cherchait ou signaler un bug devait
+    deviner laquelle des deux. Le contact vit desormais dans Aide, avec la
+    fiche du logiciel, le glossaire et la communaute.
 
-    POURQUOI UN MENU, ET POURQUOI ICI. Les sept applications n'ont aucune barre
-    de menus : l'aide n'avait aucun point d'entrée, et l'existence même du
-    glossaire ou de la page Communauté restait invisible depuis le logiciel.
-    Le bandeau est le seul chrome commun aux sept — un lien de plus ici, c'est
-    une ligne changée dans chaque gui.py, et le même comportement partout.
+    Renvoie le Rail : l'application y ajoute ses vues par `.add(...)`, ou le
+    pose tel quel (`avec_contenu=False`) si elle n'a pas de navigation.
+    `badge` est accepte pour compatibilite mais ne s'affiche plus — le logo
+    dit la marque, et le repeter en toutes lettres dans 170 px la dilue.
     """
-    # `cadre` n'est plus qu'un conteneur : le rembourrage descend dans
-    # `corps`, pour que le trait cyan puisse courir sur TOUTE la largeur,
-    # bord à bord, sans être rentré de 20 px comme le reste.
-    cadre = ttk.Frame(parent, style="Entete.TFrame")
-    corps_entete = ttk.Frame(cadre, style="Entete.TFrame", padding=(20, 12))
-    corps_entete.pack(fill="x")
-    ligne = ttk.Frame(corps_entete, style="Entete.TFrame")
-    ligne.pack(fill="x")
-    bloc = ttk.Frame(ligne, style="Entete.TFrame")
-    bloc.pack(side="left")
-    ttk.Label(bloc, text=nom_appli, style="EnteteTitre.TLabel").pack(anchor="w")
-    if accroche:
-        ttk.Label(bloc, text=accroche, style="EnteteSousTitre.TLabel").pack(anchor="w", pady=(2, 0))
+    _ = badge
+    rail = Rail(parent, avec_contenu=avec_contenu)
+    rail.poser_marque(nom_appli, accroche, version)
 
-    droite = ttk.Frame(ligne, style="Entete.TFrame")
-    droite.pack(side="right", anchor="ne")
-    if badge:
-        ttk.Label(droite, text=badge, style="EntetePuce.TLabel").pack(anchor="e")
-
-    def _lien(texte, action):
-        lab = ttk.Label(droite, text=texte, style="EnteteLien.TLabel", cursor="hand2")
-        lab.pack(anchor="e", pady=(8, 0))
-        lab.bind("<Button-1>", lambda _e: action())
-        lab.bind("<Enter>", lambda _e: lab.configure(foreground=PALETTE["texte"]))
-        lab.bind("<Leave>", lambda _e: lab.configure(foreground=PALETTE["cyan_fonce"]))
-        return lab
-
-    # Bascule clair/sombre : toujours présente. Le libellé annonce la cible.
-    _lien("☀  Mode clair" if _MODE[0] == "dark" else "☾  Mode sombre",
-          lambda: basculer(parent))
-    if on_contact is not None:
-        _lien("✉  Contact", on_contact)
-
-    cadre.menu_aide = None
+    # Pied de colonne. `side="bottom"` empile du bas vers le haut : le premier
+    # pose est le plus bas. On veut, de bas en haut : version (deja posee par
+    # poser_marque), Aide, puis Theme.
     if slug:
         menu = tk.Menu(parent, tearoff=0)
         menu.add_command(label="Guide, notes de version et téléchargement",
@@ -792,24 +781,26 @@ def entete(parent: tk.Misc, nom_appli: str, accroche: str = "", *,
         menu.add_separator()
         # Une ligne d'information, pas une action : la version, et la licence —
         # « libre » est une promesse que l'utilisateur doit pouvoir lire ici.
-        menu.add_command(label=f"{nom_appli} v{version or '?'} — logiciel libre, licence MIT", state="disabled")
+        menu.add_command(label=f"{nom_appli} v{version or '?'} — logiciel libre, licence MIT",
+                         state="disabled")
 
-        def derouler(lab):
+        def derouler(lien):
             try:
-                menu.tk_popup(lab.winfo_rootx(), lab.winfo_rooty() + lab.winfo_height())
+                menu.tk_popup(lien.winfo_rootx() + lien.winfo_width(), lien.winfo_rooty())
             finally:
                 menu.grab_release()
 
-        lien_aide = _lien("?  Aide", lambda: None)
+        lien_aide = rail.poser_lien("?  Aide", lambda: None)
         lien_aide.bind("<Button-1>", lambda _e: derouler(lien_aide))
-        cadre.menu_aide = menu
+        rail.menu_aide = menu
+    elif on_contact is not None:
+        # Sans slug il n'y a pas de menu Aide : le contact garde alors sa
+        # propre entree, sinon il n'y aurait plus aucun moyen de signaler.
+        rail.poser_lien("✉  Nous contacter", on_contact)
 
-    # LA signature de la marque, dans les deux thèmes : deux pixels de cyan
-    # bord à bord. Un Frame vide de hauteur 2 — aucun enfant, donc aucune
-    # propagation de géométrie à désactiver.
-    ttk.Frame(cadre, style="EnteteTrait.TFrame", height=2).pack(fill="x", side="bottom")
-    return cadre
-
+    rail.poser_lien("☀  Mode clair" if _MODE[0] == "dark" else "☾  Mode sombre",
+                    lambda: basculer(parent))
+    return rail
 
 def basculer(parent: tk.Misc) -> str:
     """Inverse clair/sombre : enregistre la préférence, puis propose un
@@ -860,6 +851,32 @@ def carte(parent: tk.Misc, titre: str = "", *, doux: bool = False, **kw) -> ttk.
         ttk.Label(cadre, text=titre, style="CarteTitre.TLabel").pack(anchor="w", pady=(0, 10))
     return cadre
 
+def _logo(widget: tk.Misc):
+    """Le logo OPL en 26 px, ou None s'il est introuvable.
+
+    Charge par tk.PhotoImage, qui lit le PNG NATIVEMENT depuis Tk 8.6 : aucune
+    dependance a l'execution. Cela compte — DownloadOrganizer et Enveloppe n'en
+    ont aucune, et un logo ne justifie pas d'en ajouter une. Absent, on se
+    passe de l'image plutot que d'echouer : le nom de l'application suffit.
+
+    ⚠️ LE CACHE EST PAR FENETRE, JAMAIS AU NIVEAU DU MODULE. Une tk.PhotoImage
+    appartient a l'interpreteur Tcl qui l'a creee : gardee dans une variable de
+    module, elle survit a la destruction de sa fenetre et la fenetre SUIVANTE
+    la recoit morte — « image doesn't exist ». Mesure : toutes les suites de
+    tests tombaient d'un coup, alors que chaque test passait isolement."""
+    haut = widget.winfo_toplevel()
+    cache = getattr(haut, "_opl_logo", "absent")
+    if cache != "absent":
+        return cache
+    base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+    try:
+        img = tk.PhotoImage(master=haut, file=str(base / "opl-logo-26.png"))
+    except (tk.TclError, OSError):
+        img = None
+    haut._opl_logo = img          # ancre la reference sur LA fenetre
+    return img
+
+
 class Rail(ttk.Frame):
     """Navigation VERTICALE, en remplacement de ttk.Notebook.
 
@@ -883,14 +900,25 @@ class Rail(ttk.Frame):
 
     LARGEUR = 170          # mesure sur le plus long libelle reel de la suite
 
-    def __init__(self, parent, *, largeur: int = LARGEUR, **kw):
+    def __init__(self, parent, *, largeur: int = LARGEUR, avec_contenu: bool = True, **kw):
+        """`avec_contenu=False` : le rail n'est QUE sa colonne — pas de zone de
+        travail. C'est le cas des applications qui n'ont aucune navigation par
+        vues (Coffre, GuideExpress, PhotoTri) : elles gardent leur mise en page
+        et ne recoivent que la marque et le pied."""
         super().__init__(parent, style="RailHote.TFrame", takefocus=True, **kw)
         self._barre = ttk.Frame(self, style="Rail.TFrame", width=largeur)
         self._barre.pack(side="left", fill="y")
         self._barre.pack_propagate(False)      # sinon la barre se retrecit sur son contenu
         ttk.Frame(self, style="RailTrait.TFrame", width=1).pack(side="left", fill="y")
-        self._contenu = ttk.Frame(self, style="RailContenu.TFrame")
-        self._contenu.pack(side="left", fill="both", expand=True)
+        self.menu_aide = None
+        # Marge basse, posee AVANT les liens du pied : avec side="bottom", le
+        # premier pose est le plus bas — sans elle, « Aide » se colle au bord
+        # de la fenetre. Constate a l'ecran.
+        ttk.Frame(self._barre, style="Rail.TFrame", height=10).pack(fill="x", side="bottom")
+        self._contenu = None
+        if avec_contenu:
+            self._contenu = ttk.Frame(self, style="RailContenu.TFrame")
+            self._contenu.pack(side="left", fill="both", expand=True)
         # TOUTES les pages sont empilees dans LA MEME cellule de grille, comme
         # le fait ttk.Notebook : la cellule reclame donc la taille de la plus
         # grande, et la fenetre se calibre sur la vue la plus encombrante et
@@ -898,8 +926,8 @@ class Rail(ttk.Frame):
         # qu'un tkraise(), sans aucun rappel differe — un `after_idle` posait
         # ici un « can't delete Tcl command » a la fermeture, une erreur qui
         # ne dit rien de sa cause.
-        self._contenu.grid_rowconfigure(0, weight=1)
-        self._contenu.grid_columnconfigure(0, weight=1)
+            self._contenu.grid_rowconfigure(0, weight=1)
+            self._contenu.grid_columnconfigure(0, weight=1)
         self._pages: list = []                 # [{page, texte, entree, barre, label}]
         self._courant = None
         self.bind("<Up>", lambda _e: self._voisin(-1))
@@ -908,6 +936,46 @@ class Rail(ttk.Frame):
         self.bind("<End>", lambda _e: self.select(len(self._pages) - 1))
 
     # -- construction ------------------------------------------------------
+
+    def poser_marque(self, nom: str, accroche: str = "", version: str = "") -> None:
+        """La marque, EN HAUT DE LA COLONNE. Elle remplace le bandeau horizontal
+        qui courait sur toute la largeur : il coutait 135 px de hauteur pour
+        afficher quatre liens, alors que la colonne les porte sans rien couter
+        de plus. Le trait cyan reste — c'est la signature de la marque —, mais
+        il passe sous le bloc au lieu de traverser la fenetre."""
+        bloc = ttk.Frame(self._barre, style="RailMarque.TFrame", padding=(13, 14, 10, 12))
+        bloc.pack(fill="x", side="top")
+        ligne = ttk.Frame(bloc, style="RailMarque.TFrame")
+        ligne.pack(fill="x")
+        logo = _logo(self)
+        if logo is not None:
+            # L'image est ancree sur le widget : sans cette reference, le
+            # ramasse-miettes l'emporte et Tk affiche un carre vide.
+            etiquette = ttk.Label(ligne, image=logo, style="RailMarque.TFrame")
+            etiquette.image = logo
+            etiquette.configure(style="RailMarqueNom.TLabel")
+            etiquette.pack(side="left", padx=(0, 8))
+        ttk.Label(ligne, text=nom, style="RailMarqueNom.TLabel").pack(side="left")
+        if accroche:
+            ttk.Label(bloc, text=accroche, style="RailMarqueAccroche.TLabel",
+                      wraplength=self.LARGEUR - 26, justify="left").pack(anchor="w", pady=(4, 0))
+        ttk.Frame(self._barre, style="RailMarqueTrait.TFrame", height=2).pack(fill="x", side="top")
+        # `version` n'est PAS affichee ici : les sept applications portent deja
+        # leur version dans leur barre d'etat, avec l'etat de mise a jour a
+        # cote. La repeter dans la colonne la ferait apparaitre deux fois dans
+        # la meme fenetre — constate a l'ecran. Elle reste dans le menu Aide,
+        # ligne « A propos », ou elle est cherchee volontairement.
+        _ = version
+
+    def poser_lien(self, texte: str, action) -> ttk.Label:
+        """Un lien du pied de colonne (Theme, Aide). Colle en bas : les vues
+        s'ajoutent par le haut, ces deux-la ne bougent jamais."""
+        lien = ttk.Label(self._barre, text=texte, style="RailLien.TLabel", cursor="hand2", anchor="w")
+        lien.pack(fill="x", side="bottom")
+        lien.bind("<Button-1>", lambda _e: action())
+        lien.bind("<Enter>", lambda _e: lien.configure(style="RailLienSurvol.TLabel"))
+        lien.bind("<Leave>", lambda _e: lien.configure(style="RailLien.TLabel"))
+        return lien
 
     def add(self, page, text: str = "", groupe: str = "") -> None:
         """Ajoute une page. `groupe`, s'il est fourni, insere un intertitre

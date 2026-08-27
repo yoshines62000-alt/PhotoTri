@@ -220,8 +220,8 @@ class PhotoTriApp:
     def __init__(self, root: Tk):
         self.root = root
         self.root.title(APP_TITLE)
-        self.root.geometry("1150x720")
-        self.root.minsize(850, 550)
+        self.root.geometry("1320x720")
+        self.root.minsize(1020, 550)
         opl_theme.apply(self.root, "PhotoTri")
 
         icon_path = _resource_path("icon.ico")
@@ -319,7 +319,12 @@ class PhotoTriApp:
     # -- construction de l'interface ---------------------------------------------
 
     def _build_layout(self):
-        opl_theme.entete(self.root, "PhotoTri", "Detecteur de photos en double", on_contact=lambda: opl_contact.ouvrir(self.root, app="PhotoTri", version=APP_VERSION), slug="phototri", version=APP_VERSION).pack(fill=X)
+        # Cette application n'a pas de navigation par vues : la colonne
+        # ne porte que la marque, Theme et Aide, et se pose a gauche.
+        opl_theme.entete(
+            self.root, "PhotoTri", "Detecteur de photos en double",
+            on_contact=lambda: opl_contact.ouvrir(self.root, app="PhotoTri", version=APP_VERSION),
+            slug="phototri", version=APP_VERSION, avec_contenu=False).pack(side="left", fill="y")
 
         top = ttk.Frame(self.root)
         top.pack(fill=X, padx=10, pady=10)
@@ -507,7 +512,7 @@ class PhotoTriApp:
         # redimensionne pas son texte, il le laisse simplement deborder de
         # son propre cadre (derniere(s) lettre(s) coupees), en particulier
         # a la taille minimale officiellement supportee par l'application
-        # (root.minsize(850, 550)). Le contexte "vers le dossier de
+        # (root.minsize(1020, 550)). Le contexte "vers le dossier de
         # revision" reste de toute facon deja visible juste a gauche via le
         # champ "Dossier de revision :", ce qui rend la version longue
         # redondante.
