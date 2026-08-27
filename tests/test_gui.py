@@ -803,7 +803,10 @@ class TestShowFriendlyErrorDisplaysTranslatedMessageAndLogsDetail(unittest.TestC
             self.skipTest(f"Pas d'affichage disponible pour un test Tk reel : {exc}")
         self.tmp_dir = Path(tempfile.mkdtemp())
         self._apps = []
-        self.mock_showerror = mock.patch("tkinter.messagebox.showerror").start()
+        # `_show_friendly_error` dessine desormais un message theme. Signature
+        # (parent, titre, texte) : le corps est en position 2, et le prefixe
+        # qui servait de debut de phrase est devenu le TITRE.
+        self.mock_showerror = mock.patch.object(gui.opl_theme, "message").start()
         self.addCleanup(mock.patch.stopall)
 
     def tearDown(self):
@@ -833,7 +836,7 @@ class TestShowFriendlyErrorDisplaysTranslatedMessageAndLogsDetail(unittest.TestC
         app._show_friendly_error("L'analyse a echoue", exc)
 
         self.mock_showerror.assert_called_once()
-        shown_message = self.mock_showerror.call_args.args[1]
+        shown_message = self.mock_showerror.call_args.args[2]
         self.assertNotIn("attack", shown_message.lower())
         self.assertNotIn("178956970", shown_message)
         self.assertIn("corrompus", shown_message.lower())
@@ -848,7 +851,7 @@ class TestShowFriendlyErrorDisplaysTranslatedMessageAndLogsDetail(unittest.TestC
         content = log_path.read_text(encoding="utf-8")
         self.assertIn("detail technique precis attendu dans le journal", content)
 
-        shown_message = self.mock_showerror.call_args.args[1]
+        shown_message = self.mock_showerror.call_args.args[2]
         self.assertIn(str(log_path), shown_message, "la boite de dialogue doit indiquer ou trouver le detail")
 
 

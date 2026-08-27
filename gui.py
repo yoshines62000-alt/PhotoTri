@@ -1574,10 +1574,10 @@ class PhotoTriApp:
         detail = f"{type(exc).__name__}: {exc}"
         log_path = self._log_technical_error(detail)
         friendly = _friendly_error_text(exc)
-        messagebox.showerror(
-            APP_TITLE,
-            f"{title_prefix} :\n{friendly}\n\n(Details techniques enregistres dans {log_path})",
-        )
+        opl_theme.message(
+            self.root, title_prefix,
+            f"{friendly}\n\n(Details techniques enregistres dans {log_path})",
+            ton="erreur")
 
     def _handle_callback_exception(self, exc_type, exc_value, exc_traceback):
         """Filet de securite global : par defaut, Tkinter avale
