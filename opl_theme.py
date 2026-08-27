@@ -54,7 +54,7 @@ import webbrowser
 from pathlib import Path
 from tkinter import ttk
 
-__all__ = ["apply", "entete", "carte", "Rail", "etat_vide", "Erreur", "dialogue",
+__all__ = ["apply", "entete", "carte", "Rail", "etat_vide", "Erreur", "dialogue", "message", "Statut",
            "PALETTE", "couleur", "police"]
 
 # --- Palette (deux modes) -------------------------------------------------
@@ -707,6 +707,20 @@ def apply(root: tk.Misc, nom_appli: str = "", *, base: str = "clam", mode=None) 
     style.configure("DialogueTitre.TLabel", background=p["fond"], foreground=p["texte"], font=(titre, 11))
     style.configure("DialogueTexte.TLabel", background=p["surface"], foreground=p["texte_doux"], font=(corps, 9))
     style.configure("DialoguePied.TFrame", background=p["surface"])
+    # Le TON d'un message : seule la barre de gauche change de couleur. Le
+    # texte reste `texte_doux` dans les trois cas — un paragraphe entier en
+    # rouge se lit mal, et la couleur doit dire le registre, pas crier.
+    style.configure("MessageInfo.TFrame", background=p["cyan"])
+    style.configure("MessageAlerte.TFrame", background=p["avertissement"])
+    style.configure("MessageErreur.TFrame", background=p["danger"])
+    style.configure("MessageTitreInfo.TLabel", background=p["fond"], foreground=p["texte"], font=(titre, 11))
+    style.configure("MessageTitreAlerte.TLabel", background=p["fond"], foreground=p["avertissement"], font=(titre, 11))
+    style.configure("MessageTitreErreur.TLabel", background=p["fond"], foreground=p["danger"], font=(titre, 11))
+    # Barre d'etat : le message y prend la couleur de son ton, mais reste sur
+    # le fond de la barre — il informe, il n'alerte pas.
+    style.configure("Statut.TLabel", background=p["fond"], foreground=p["texte_doux"], font=(corps, 9))
+    style.configure("StatutSucces.TLabel", background=p["fond"], foreground=p["succes"], font=(corps, 9))
+    style.configure("StatutAlerte.TLabel", background=p["fond"], foreground=p["avertissement"], font=(corps, 9))
 
     # --- montage des images (avec repli par widget) -----------------------
     imgs = _charger_images(root)
@@ -1274,3 +1288,148 @@ def dialogue(parent: tk.Misc, titre: str, message: str, *,
     fenetre.bouton_annuler = bouton_annuler
     parent.wait_window(fenetre)
     return reponse["ok"]
+
+
+def message(parent: tk.Misc, titre: str, texte: str, *,
+            ton: str = "info", bouton: str = "Fermer") -> None:
+    """Un message THEME — l'equivalent de messagebox.showinfo/showwarning/
+    showerror, mais dessine par l'application et non par Windows.
+
+    `dialogue()` pose une QUESTION et rend un choix ; celui-ci ne fait que
+    dire quelque chose, et n'a donc qu'un bouton. Les confondre reviendrait a
+    demander « Annuler / Confirmer » sur une phrase qui n'attend rien.
+
+    `ton` colore la barre de gauche et le titre : "info", "alerte" ou
+    "erreur". Le corps du texte, lui, reste dans l'encre douce dans les trois
+    cas — un paragraphe entier en rouge se lit mal, et la couleur doit dire le
+    registre, pas hausser la voix.
+
+    ⚠️ UN MESSAGE MODAL N'EST PAS TOUJOURS LA BONNE REPONSE. « Termine »,
+    « Rien a faire », « Selectionnez d'abord un element » interrompent pour
+    dire ce qu'une barre d'etat ou une erreur en ligne dirait sans bloquer.
+    Ce composant existe pour ce qui MERITE d'arreter l'utilisateur — un echec
+    qu'il doit lire, une operation dont il doit connaitre le resultat.
+    """
+    tons = {"info": ("MessageInfo.TFrame", "MessageTitreInfo.TLabel"),
+            "alerte": ("MessageAlerte.TFrame", "MessageTitreAlerte.TLabel"),
+            "erreur": ("MessageErreur.TFrame", "MessageTitreErreur.TLabel")}
+    style_barre, style_titre = tons.get(ton, tons["info"])
+
+    fenetre = tk.Toplevel(parent)
+    fenetre.title(titre)
+    fenetre.resizable(False, False)
+    fenetre.configure(background=PALETTE["surface"])
+    try:
+        fenetre.transient(parent.winfo_toplevel())
+    except tk.TclError:
+        pass
+
+    tete = ttk.Frame(fenetre, style="DialogueTete.TFrame", padding=(18, 12))
+    tete.pack(fill="x")
+    ttk.Label(tete, text=titre, style=style_titre).pack(anchor="w")
+    ttk.Frame(fenetre, style=style_barre, height=2).pack(fill="x")
+
+    corps = ttk.Frame(fenetre, style="Dialogue.TFrame", padding=(18, 16))
+    corps.pack(fill="both", expand=True)
+    ttk.Label(corps, text=texte, style="DialogueTexte.TLabel",
+              wraplength=420, justify="left").pack(anchor="w")
+
+    pied = ttk.Frame(fenetre, style="DialoguePied.TFrame", padding=(18, 0, 18, 16))
+    pied.pack(fill="x")
+
+    def fermer() -> None:
+        try:
+            fenetre.grab_release()
+        except tk.TclError:
+            pass
+        fenetre.destroy()
+
+    ok = ttk.Button(pied, text=bouton, command=fermer, style="Accent.TButton")
+    ok.pack(side="right")
+    fenetre.bind("<Return>", lambda _e: fermer())
+    fenetre.bind("<Escape>", lambda _e: fermer())
+    fenetre.protocol("WM_DELETE_WINDOW", fermer)
+
+    fenetre.update_idletasks()
+    try:
+        haut = parent.winfo_toplevel()
+        x = haut.winfo_rootx() + (haut.winfo_width() - fenetre.winfo_reqwidth()) // 2
+        y = haut.winfo_rooty() + (haut.winfo_height() - fenetre.winfo_reqheight()) // 3
+        fenetre.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+    except tk.TclError:
+        pass
+    try:
+        fenetre.grab_set()
+    except tk.TclError:
+        pass
+    ok.focus_set()
+    fenetre.bouton_fermer = ok          # expose pour les tests
+    parent.wait_window(fenetre)
+
+
+class Statut(ttk.Label):
+    """La barre d'etat : ce qui s'est passe, SANS arreter l'utilisateur.
+
+    Un tiers des boites de dialogue de cette suite ne posaient aucune question
+    et n'annoncaient aucun echec : « Termine », « Rien a faire », « Aucun
+    fichier trouve ». Elles coutaient un clic et une rupture d'attention pour
+    dire quelque chose que la fenetre pouvait afficher sans rien bloquer.
+
+    Le message s'efface tout seul apres `secondes` — une barre d'etat qui
+    garde indefiniment un « Termine » finit par decrire un passe lointain, et
+    l'utilisateur cesse de la lire.
+    """
+
+    TONS = {"info": "Statut.TLabel", "succes": "StatutSucces.TLabel",
+            "alerte": "StatutAlerte.TLabel"}
+
+    def __init__(self, parent: tk.Misc, **kw):
+        super().__init__(parent, text="", style="Statut.TLabel", **kw)
+        self._effacement = None
+        self._hote = None
+
+    def dire(self, texte: str, ton: str = "info", secondes: float = 8) -> None:
+        """Affiche `texte`. Un message qui arrive remplace le precedent :
+        deux etats simultanes n'existent pas, et le plus recent est le vrai."""
+        # Une barre d'etat tient sur UNE ligne : les retours a la ligne d'un
+        # ancien message de boite deformeraient la fenetre entiere.
+        self.configure(text=" ".join(str(texte).split()),
+                       style=self.TONS.get(ton, "Statut.TLabel"))
+        self._reprogrammer(secondes)
+
+    def effacer(self) -> None:
+        self._annuler()
+        try:
+            self.configure(text="")
+        except tk.TclError:
+            pass
+
+    # -- interne -----------------------------------------------------------
+
+    def _annuler(self) -> None:
+        if self._effacement is None:
+            return
+        try:
+            (self._hote or self).after_cancel(self._effacement)
+        except tk.TclError:
+            pass
+        self._effacement = None
+
+    def _reprogrammer(self, secondes: float) -> None:
+        self._annuler()
+        if secondes and secondes > 0:
+            # LE RAPPEL EST PROGRAMME SUR LA FENETRE, PAS SUR CE WIDGET.
+            # `after` enregistre une commande Tcl sur le widget qui le porte ;
+            # un gc.collect() juste avant root.destroy() (ce que font les
+            # harnais de test de cette suite) la supprime, puis destroy()
+            # essaie de la supprimer a son tour — « can't delete Tcl command »,
+            # une erreur qui ne dit rien de sa cause. La fenetre, elle, vit
+            # plus longtemps que l'etiquette. Et pas de liaison <Destroy> non
+            # plus : une methode liee passee a bind() cree le meme cycle.
+            self._hote = self.winfo_toplevel()
+            self._effacement = self._hote.after(int(secondes * 1000), self._expirer)
+
+    def _expirer(self) -> None:
+        self._effacement = None
+        if self.winfo_exists():
+            self.configure(text="", style="Statut.TLabel")

@@ -1242,7 +1242,9 @@ class PhotoTriApp:
         checked_hidden = {pid for pid in self._marked_ids if pid not in self._checkbox_vars}
         checked_ids = sorted(checked_visible | checked_hidden)
         if not checked_ids:
-            messagebox.showinfo(APP_TITLE, "Aucune photo cochee.")
+            self.statut.dire(
+                "Aucune photo cochee.",
+                ton="info")
             return
         if len(checked_ids) == len(self._selected_group.photo_ids):
             if not opl_theme.dialogue(
