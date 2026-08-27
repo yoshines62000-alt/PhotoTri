@@ -280,6 +280,38 @@ class TestParentDesMessages(unittest.TestCase):
         self.assertEqual(fautifs, [], "\n".join(
             ["parent introuvable a l'execution (pas de `self` dans cette portee) :"] + fautifs))
 
+class TestAncrageDesErreurs(unittest.TestCase):
+    """Une `Erreur` doit savoir OU se poser, sinon elle se pose n'importe ou.
+
+    `montrer()` fait un `pack()`. Sans `apres`, ce pack empile a la fin de
+    l'ordre courant du parent — donc SOUS les boutons, puisqu'ils sont poses
+    avant que l'erreur ne s'affiche pour la premiere fois. Le message existe,
+    il dit la bonne chose, il est juste a des dizaines de pixels de son champ :
+    exactement ce que ce composant existe pour eviter.
+
+    Deux formes acceptees, et deux seulement :
+      - `Erreur(parent, apres=<widget>)` — l'ancrage est explicite ;
+      - `Erreur(porte...)` — le parent est une frame dediee, placee une fois
+        au montage a l'endroit voulu (le seul moyen dans un conteneur en
+        `grid`, ou un `pack()` dans le parent leverait une TclError).
+    """
+
+    def test_chaque_erreur_sait_ou_se_poser(self):
+        source = (Path(__file__).resolve().parent.parent / "gui.py").read_text(encoding="utf-8")
+        fautives = []
+        for n in ast.walk(ast.parse(source)):
+            if not (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                    and n.func.attr == "Erreur"):
+                continue
+            if any(k.arg == "apres" for k in n.keywords):
+                continue
+            parent = (ast.get_source_segment(source, n.args[0]) if n.args else "") or ""
+            if not parent.startswith("porte"):
+                fautives.append(f"gui.py ligne {n.lineno} : Erreur({parent}) sans `apres`")
+        self.assertEqual(fautives, [], "\n".join(
+            ["erreur en ligne sans point d'ancrage (elle se posera en fin de conteneur) :"]
+            + fautives))
+
 
 if __name__ == "__main__":
     unittest.main()
