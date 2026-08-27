@@ -1151,6 +1151,15 @@ class Erreur(ttk.Frame):
     def visible(self) -> bool:
         return self._visible
 
+    @property
+    def texte(self) -> str:
+        """Ce que l'erreur dit, ou "" quand elle est cachee.
+
+        Existe pour les tests : ils doivent pouvoir affirmer sur le media que
+        l'utilisateur voit reellement, sans atteindre l'interieur du
+        composant. Rend le corps du message, pas l'intitule du champ."""
+        return self._texte.cget("text") if self._visible else ""
+
     def montrer(self, quoi: str, texte: str, *, champ: tk.Misc = None) -> None:
         """Affiche l'erreur. `quoi` nomme le champ (« Montant »), `texte` dit
         ce qui ne va pas et comment le reparer. `champ`, s'il est fourni, est
