@@ -4,6 +4,7 @@ Un menu qui promet « Glossaire » doit ouvrir LE glossaire — l'URL est mesure
 pas supposee — et « Signaler un probleme » doit appeler le contact fourni par
 l'application, pas ouvrir un navigateur.
 """
+import ast
 import sys
 import tkinter as tk
 import unittest
@@ -244,6 +245,40 @@ class TestDialogue(unittest.TestCase):
         opl_theme.dialogue(self.root, "Purger les metadonnees", "Le titre et l'auteur seront retires.",
                            confirmer="Purger")
         self.assertEqual(vus["titre"], "Purger les metadonnees")
+
+
+class TestParentDesMessages(unittest.TestCase):
+    """`message()` et `dialogue()` exigent une FENETRE en premier argument.
+
+    Ce garde existe parce que le defaut est arrive : une conversion en lot a
+    pose `self.root` dans trois fonctions de niveau MODULE, ou `self` n'existe
+    pas. Le NameError partait dans un `except Exception` voisin — donc pas de
+    trace, pas de plantage, juste un avertissement qui ne s'affiche plus. Sur
+    Coffre, celui qui previent que les mots de passe sont dans un AUTRE
+    dossier.
+
+    Il lit le `gui.py` de son application : chaque copie de ce fichier garde
+    la sienne, sans rien partager.
+    """
+
+    def test_aucun_self_hors_d_une_methode(self):
+        source = (Path(__file__).resolve().parent.parent / "gui.py").read_text(encoding="utf-8")
+        arbre = ast.parse(source)
+        methodes = [(n.lineno, n.end_lineno) for n in ast.walk(arbre)
+                    if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and n.args.args and n.args.args[0].arg == "self"]
+        fautifs = []
+        for n in ast.walk(arbre):
+            if not (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                    and n.func.attr in ("message", "dialogue") and n.args):
+                continue
+            premier = ast.get_source_segment(source, n.args[0]) or ""
+            if premier.split(".")[0] != "self":
+                continue
+            if not any(d <= n.lineno <= f for d, f in methodes):
+                fautifs.append(f"gui.py ligne {n.lineno} : `{premier}`")
+        self.assertEqual(fautifs, [], "\n".join(
+            ["parent introuvable a l'execution (pas de `self` dans cette portee) :"] + fautifs))
 
 
 if __name__ == "__main__":

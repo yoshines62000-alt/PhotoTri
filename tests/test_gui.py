@@ -25,6 +25,34 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import gui
 import grouping
 
+# --- FILET ANTI-BLOCAGE -----------------------------------------------------
+# `opl_theme.message()` dessine une vraie fenetre modale qui attend un clic.
+# Un test qui emprunte un chemin d'erreur ferait pendre la suite ENTIERE : pas
+# d'echec, pas de trace, juste une execution qui ne finit jamais. On neutralise
+# donc le composant pour tout ce module. Les tests qui verifient un message le
+# repatchent localement — un patch imbrique prend le pas sur celui-ci.
+_filet_message = None
+
+
+def setUpModule():
+    # Imports locaux : les fichiers hotes ne nomment pas ces modules de la
+    # meme facon (`patch` ou `mock.patch`, `gui` ou `gui as gui_mod`, ou pas de
+    # gui du tout). `opl_theme` est le meme objet module que `gui.opl_theme`,
+    # le patch porte donc des deux cotes.
+    from unittest.mock import patch as _patch
+
+    import opl_theme as _theme
+
+    global _filet_message
+    _filet_message = _patch.object(_theme, "message")
+    _filet_message.start()
+
+
+def tearDownModule():
+    if _filet_message is not None:
+        _filet_message.stop()
+# ----------------------------------------------------------------------------
+
 
 # Chemin de dossier "realiste mais long" : une arborescence OneDrive tout a
 # fait ordinaire (annee + evenement + sous-dossier de journee), pas un cas

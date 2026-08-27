@@ -1590,11 +1590,11 @@ class PhotoTriApp:
         message = "".join(traceback.format_exception(exc_type, exc_value, exc_traceback))
         log_path = self._log_technical_error(message)
         try:
-            messagebox.showerror(
-                APP_TITLE,
+            opl_theme.message(
+                self.root, "Erreur inattendue",
                 "Une erreur inattendue s'est produite. Les details ont ete "
                 f"enregistres dans :\n{log_path}",
-            )
+                ton="erreur")
         except Exception:
             pass
 
