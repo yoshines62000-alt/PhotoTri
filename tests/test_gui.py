@@ -31,26 +31,31 @@ import grouping
 # d'echec, pas de trace, juste une execution qui ne finit jamais. On neutralise
 # donc le composant pour tout ce module. Les tests qui verifient un message le
 # repatchent localement — un patch imbrique prend le pas sur celui-ci.
-_filet_message = None
+_message_reel = None
 
 
 def setUpModule():
-    # Imports locaux : les fichiers hotes ne nomment pas ces modules de la
-    # meme facon (`patch` ou `mock.patch`, `gui` ou `gui as gui_mod`, ou pas de
-    # gui du tout). `opl_theme` est le meme objet module que `gui.opl_theme`,
-    # le patch porte donc des deux cotes.
-    from unittest.mock import patch as _patch
-
+    # Import local : les fichiers hotes ne nomment pas `gui` de la meme facon
+    # (`gui`, `gui as gui_mod`, ou pas de gui du tout). `opl_theme` est le meme
+    # objet module que `gui.opl_theme`, le leurre porte donc des deux cotes.
     import opl_theme as _theme
 
-    global _filet_message
-    _filet_message = _patch.object(_theme, "message")
-    _filet_message.start()
+    global _message_reel
+    _message_reel = _theme.message
+    # ⚠️ ECHANGE D'ATTRIBUT, PAS `mock.patch`. Un patcher demarre par `.start()`
+    # s'inscrit dans un registre global que `mock.patch.stopall()` vide — et
+    # plusieurs classes de ces suites appellent `stopall` dans leur nettoyage.
+    # Le filet mourait donc au premier test d'une de ces classes, et le suivant
+    # qui empruntait un chemin d'erreur ouvrait une VRAIE modale : la suite
+    # pendait, sans echec ni message. Un echange direct n'est inscrit nulle part.
+    _theme.message = lambda *args, **kwargs: None
 
 
 def tearDownModule():
-    if _filet_message is not None:
-        _filet_message.stop()
+    if _message_reel is not None:
+        import opl_theme as _theme
+
+        _theme.message = _message_reel
 # ----------------------------------------------------------------------------
 
 
@@ -573,8 +578,9 @@ class TestOrphanCopyNotLeftUnindexedOnMoveFailure(unittest.TestCase):
         self.review_dir = self.tmp_dir / "revision"
         self._apps = []
 
-        # showerror/showinfo neutralises (vraies boites modales) ;
-        # showwarning capture pour inspecter le message reellement montre a
+        # showerror/showinfo neutralises (vraies boites modales) ; le compte
+        # rendu de deplacement passe desormais par opl_theme.message, capture
+        # ici pour inspecter le message reellement montre a
         # l'utilisateur, sans jamais toucher aux widgets/logique metier.
         self._patchers = [
             mock.patch("tkinter.messagebox.showerror"),
@@ -584,6 +590,10 @@ class TestOrphanCopyNotLeftUnindexedOnMoveFailure(unittest.TestCase):
             p.start()
             self.addCleanup(p.stop)
         self.mock_showwarning = mock.patch("tkinter.messagebox.showwarning").start()
+        # Le compte rendu de deplacement est multiligne (il enumere les echecs
+        # et cite le journal) : il vit dans opl_theme.message, pas en barre
+        # d'etat. Signature (parent, titre, texte) -> le texte est en 2.
+        self.mock_message = mock.patch.object(gui.opl_theme, "message").start()
         self.addCleanup(mock.patch.stopall)
 
     def tearDown(self):
@@ -663,8 +673,8 @@ class TestOrphanCopyNotLeftUnindexedOnMoveFailure(unittest.TestCase):
         self.assertEqual(row["status"], "moved", "le fichier est bel et bien range : l'index doit le refleter")
         self.assertEqual(row["moved_to"], str(dest_path))
 
-        self.mock_showwarning.assert_called_once()
-        shown_message = self.mock_showwarning.call_args.args[1]
+        self.mock_message.assert_called_once()
+        shown_message = self.mock_message.call_args.args[2]
         self.assertNotIn("Echec pour", shown_message, "ne doit pas etre presente comme un pur echec")
         self.assertIn("original n'a PAS pu etre", shown_message)
         self.assertIn("a_deplacer.jpg", shown_message)
@@ -693,8 +703,8 @@ class TestOrphanCopyNotLeftUnindexedOnMoveFailure(unittest.TestCase):
         row = app.db.get_photo(move_id)
         self.assertEqual(row["status"], "active", "un veritable echec ne doit pas marquer la photo comme deplacee")
 
-        self.mock_showwarning.assert_called_once()
-        shown_message = self.mock_showwarning.call_args.args[1]
+        self.mock_message.assert_called_once()
+        shown_message = self.mock_message.call_args.args[2]
         self.assertIn("Echec pour", shown_message)
         self.assertIn("echec.jpg", shown_message)
 

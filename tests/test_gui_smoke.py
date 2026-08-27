@@ -41,26 +41,31 @@ import hashing
 # d'echec, pas de trace, juste une execution qui ne finit jamais. On neutralise
 # donc le composant pour tout ce module. Les tests qui verifient un message le
 # repatchent localement — un patch imbrique prend le pas sur celui-ci.
-_filet_message = None
+_message_reel = None
 
 
 def setUpModule():
-    # Imports locaux : les fichiers hotes ne nomment pas ces modules de la
-    # meme facon (`patch` ou `mock.patch`, `gui` ou `gui as gui_mod`, ou pas de
-    # gui du tout). `opl_theme` est le meme objet module que `gui.opl_theme`,
-    # le patch porte donc des deux cotes.
-    from unittest.mock import patch as _patch
-
+    # Import local : les fichiers hotes ne nomment pas `gui` de la meme facon
+    # (`gui`, `gui as gui_mod`, ou pas de gui du tout). `opl_theme` est le meme
+    # objet module que `gui.opl_theme`, le leurre porte donc des deux cotes.
     import opl_theme as _theme
 
-    global _filet_message
-    _filet_message = _patch.object(_theme, "message")
-    _filet_message.start()
+    global _message_reel
+    _message_reel = _theme.message
+    # ⚠️ ECHANGE D'ATTRIBUT, PAS `mock.patch`. Un patcher demarre par `.start()`
+    # s'inscrit dans un registre global que `mock.patch.stopall()` vide — et
+    # plusieurs classes de ces suites appellent `stopall` dans leur nettoyage.
+    # Le filet mourait donc au premier test d'une de ces classes, et le suivant
+    # qui empruntait un chemin d'erreur ouvrait une VRAIE modale : la suite
+    # pendait, sans echec ni message. Un echange direct n'est inscrit nulle part.
+    _theme.message = lambda *args, **kwargs: None
 
 
 def tearDownModule():
-    if _filet_message is not None:
-        _filet_message.stop()
+    if _message_reel is not None:
+        import opl_theme as _theme
+
+        _theme.message = _message_reel
 # ----------------------------------------------------------------------------
 
 

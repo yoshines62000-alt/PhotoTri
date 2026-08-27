@@ -1511,9 +1511,9 @@ class PhotoTriApp:
         if log_path is not None:
             message += f"\n\n(Details techniques enregistres dans {log_path})"
         if failed or orphan_copies:
-            messagebox.showwarning(APP_TITLE, message)
+            opl_theme.message(self.root, "Deplacement partiel", message, ton="alerte")
         else:
-            messagebox.showinfo(APP_TITLE, message)
+            opl_theme.message(self.root, "Deplacement termine", message, ton="info")
         self._refresh_groups()
 
     # -- fermeture -------------------------------------------------------------------
