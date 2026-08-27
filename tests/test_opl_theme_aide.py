@@ -5,10 +5,11 @@ pas supposee — et « Signaler un probleme » doit appeler le contact fourni pa
 l'application, pas ouvrir un navigateur.
 """
 import ast
+import re
 import sys
 import tkinter as tk
 import unittest
-from pathlib import Path
+from pathlib import Path, PurePath
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -311,6 +312,51 @@ class TestAncrageDesErreurs(unittest.TestCase):
         self.assertEqual(fautives, [], "\n".join(
             ["erreur en ligne sans point d'ancrage (elle se posera en fin de conteneur) :"]
             + fautives))
+
+class TestAssetsDeclaresDansLeSpec(unittest.TestCase):
+    """Un asset du depot charge par le code doit etre dans les `datas`.
+
+    Sinon l'`.exe` empaquete sort sans lui, EN SILENCE : le code retombe sur
+    son repli, et aucun test lance depuis les sources ne peut le voir — ils
+    lisent le fichier, qui est bien la. Le defaut n'apparait que dans le
+    binaire livre, chez l'utilisateur.
+
+    ⚠️ La regle ne porte QUE sur les fichiers qui existent dans le depot. Une
+    version plus large, exigeant la declaration de toute chaine finissant par
+    `.png` ou `.json`, signalait `donnees.json`, `session.json`,
+    `etape-*.png` — des fichiers crees a l'EXECUTION dans le dossier de
+    l'utilisateur, qu'il serait faux d'embarquer. Mesure : 15 faux positifs
+    contre zero.
+    """
+
+    EXTENSIONS = (".png", ".ico", ".ttf", ".json")
+
+    def test_chaque_asset_charge_est_embarque(self):
+        depot = Path(__file__).resolve().parent.parent
+        specs = list(depot.glob("*.spec"))
+        self.assertEqual(len(specs), 1, f"{len(specs)} fichier(s) .spec")
+        spec = specs[0].read_text(encoding="utf-8")
+        couverts = set()
+        for chemin, _dest in re.findall(r"\('([^']+)',\s*'([^']*)'\)", spec):
+            couverts.add(chemin)
+            couverts.add(PurePath(chemin).name)
+
+        oublies = []
+        for source in sorted(depot.glob("*.py")):
+            arbre = ast.parse(source.read_text(encoding="utf-8"))
+            for n in ast.walk(arbre):
+                if not (isinstance(n, ast.Constant) and isinstance(n.value, str)):
+                    continue
+                valeur = n.value
+                if "*" in valeur or not valeur.lower().endswith(self.EXTENSIONS):
+                    continue
+                if not (depot / valeur).is_file():
+                    continue          # cree a l'execution, pas un asset
+                if valeur not in couverts:
+                    oublies.append(f"{source.name} ligne {n.lineno} : {valeur}")
+        self.assertEqual(oublies, [], "\n".join(
+            ["asset(s) du depot charges par le code mais ABSENTS des `datas` du .spec :"]
+            + oublies))
 
 
 if __name__ == "__main__":
